@@ -57,9 +57,18 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
 - **N1 — provider 核心（无传输）**  ← 本次开始
   `XOptMINLPAdapter`（实现 `ICapeMINLPModel`，背靠 `xOptProblem`；C++ ABI 加载器 + 注入构造）
   + `MockXOptProblem`（二次问题）+ gtest（adapter 直接对拍）。零外部依赖、可立即测。
-- **N2 — COM 前端**：`CoMINLP` 实现官方 IID 的 `ICapeMINLP`(+`ICapeIdentification`) 委托 adapter；
-  类厂 + DLL 导出（`DllGetClassObject`/`DllRegisterServer`…）+ 自铸 CLSID/ProgID + MINLP CATID 注册。
-  测试：注入式驱动 vtable + **回环经 capeopen_core 的 COM 后端**。被包装 DLL 路径经 `XRTO_XOPT_PROBLEM_DLL`。
+- **N2 — COM 前端**  ✅ 已落地（2026-06）
+  - [x] `CoMINLP` 实现官方 IID 的 `ICapeMINLP`（前 23 方法）委托 `ICapeMINLPModel`（生产 ctor 读
+    `XRTO_XOPT_PROBLEM_DLL` 建 `XOptMINLPAdapter`；注入 ctor 供测试）。复用 capeopen_core 的
+    `CapeOpenComInterfaces.h` + `CapeVariantMarshal` + 官方 IID。
+  - [x] `xOptMINLPcoServer.cpp`：类厂 + `DllGetClassObject`/`DllCanUnloadNow`/`DllRegisterServer`/
+    `DllUnregisterServer`，自铸 CLSID `{7B2C9E10-5A3D-4C8E-9F21-0A1B2C3D4E5F}` + ProgID `xOpt.MINLP.1`；
+    产物 **`xOptMINLPco.dll`**（导出 4 个 COM 入口已核对）。
+  - [x] **回环测试**（`tests/test_xoptminlpco_com.cpp`）：mock → adapter → `CoMINLP`(打包 VARIANT)
+    → capeopen_core `CapeMINLPModelCom`(注入, 解包) → 对拍。**1/1 通过**（adapter 4/4，共 5/5）。
+  - [ ] 待办：`ICapeIdentification`（名称/描述）+ MINLP CATID 注册（移交 N3）。
+  - 构建注记：DLL 导入库改名 `xOptMINLPco_import.lib` 避免与静态库 `xoptminlpco.lib` 大小写冲突
+    （LNK1149）；`<olectl.h>` 提供 `SELFREG_E_CLASS`；本机构建用 `-DVCPKG_APPLOCAL_DEPS=OFF`（applocal 缺 dumpbin）。
 - **N3 — COM 注册 + 跨客户端冒烟**：regsvr32 + 独立客户端 `CoCreateInstance` 验证。
 - **N4 — CORBA 前端**：`MINLPServant : POA_SqpSolver::ICapeMINLP` 委托 adapter，导出 IOR；
   测试：collocated 回环经 capeopen_core 的 CORBA 后端。
