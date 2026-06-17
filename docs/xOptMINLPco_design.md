@@ -89,8 +89,14 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - 构建：`-DWITH_XOPTMINLPCO_CORBA=ON -DTAO_TRIPLET_DIR=<…/x64-windows-static-md>`；CMake 经
     `add_subdirectory(core)` + `WITH_CAPEOPEN_CORBA=ON` 拉起 `capeopen_corba`（含 tao_idl 重生成）。
   - [ ] 待办：独立进程 CORBA server（导出 IOR/corbaname，跨进程对接真实 ORB 客户端）。
-- **N5 — 扩展输入 + 打包/文档**：再支持 C-ABI 输入（`xOptModel_createModel`/`xOptProblemT`）；
-  打包 COM DLL + CORBA server。
+- **N5 — C-ABI 输入 + 打包**  ✅ 已落地（2026-06）
+  - [x] `XOptMINLPAdapter` 重构为内部 `IXOptProblemView` 抽象 + 两实现：`CppProblemView`(xOptProblem*)
+    / `CapiProblemView`(xOptProblemT vtable，int&↔int* 转换)。`connect()` 自动探测 DLL 导出
+    （优先 `xOptModel_createModel`→C ABI；否则 `createProblem`→C++ ABI）；另加 `xOptProblemT` 注入 ctor。
+  - [x] `tests/test_xoptminlpco_capi.cpp`：in-proc 填 `xOptProblemT`（二次问题）注入 adapter，对拍。**1/1**。
+    既有 C++ ABI 路径（adapter/com/register/corba）重构后全绿（xOptMINLPco 共 8 测试）。
+  - 打包：COM 产物 `xOptMINLPco.dll`（N3 可注册激活）；CORBA `MINLPServant`（lib，N4 collocated 验证）。
+  - [ ] 待办：独立进程 CORBA server（IOR）；MINLP CATID 注册；正式 install 规则。
 
 ## 5. 风险
 

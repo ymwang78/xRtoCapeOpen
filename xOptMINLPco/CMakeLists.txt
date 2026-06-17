@@ -83,6 +83,13 @@ if(XOPTMINLPCO_BUILD_TESTS)
     target_link_libraries(test_xoptminlpco_adapter PRIVATE xoptminlpco GTest::gtest)
     add_test(NAME XOptMINLPcoAdapterTest COMMAND test_xoptminlpco_adapter)
 
+    # N5：C-ABI(xOptProblemT) 输入路径
+    add_executable(test_xoptminlpco_capi
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_capi.cpp
+    )
+    target_link_libraries(test_xoptminlpco_capi PRIVATE xoptminlpco GTest::gtest)
+    add_test(NAME XOptMINLPcoCapiTest COMMAND test_xoptminlpco_capi)
+
     if(WITH_XOPTMINLPCO_COM)
         # 回环：mock → adapter → CoMINLP → capeopen_core CapeMINLPModelCom
         add_executable(test_xoptminlpco_com

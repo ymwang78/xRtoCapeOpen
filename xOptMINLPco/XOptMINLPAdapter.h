@@ -1,6 +1,6 @@
 ﻿#pragma once
 // ***************************************************************
-//  XOptMINLPAdapter   version:  1.0   -  date:  2026/06/17
+//  XOptMINLPAdapter   version:  2.0   -  date:  2026/06/17
 //  -------------------------------------------------------------
 //  This file is a part of project xRtoCapeOpen (xOptMINLPco).
 //  Copyright (C) 2026 - All Rights Reserved
@@ -9,23 +9,29 @@
 //  （复用 capeopen_core 的抽象），供 COM/CORBA 前端发布为 CAPE-OPEN MINLP。
 //  详见 docs/xOptMINLPco_design.md §2、§3。
 //
-//  输入来源（C++ ABI）：
-//    - dll_path：加载导出 createProblem()/destroyProblem() 的 DLL；
-//    - 注入 xOptProblem*：用于 in-proc 单测（不拥有该指针）。
+//  输入来源（自动探测 DLL 导出，N1=C++ ABI / N5=C ABI）：
+//    - C++ ABI：DLL 导出 createProblem()/destroyProblem()（返回 xOptProblem*）
+//    - C   ABI：DLL 导出 xOptModel_createModel()（填 xOptModelT，buildProblem 填 xOptProblemT）
+//    - 注入：xOptProblem*（C++）或 xOptProblemT（C）—— 用于 in-proc 单测，不拥有
 // ***************************************************************
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "CapeMINLPModel.h"     // ICapeMINLPModel（来自 capeopen_core）
+#include "xOpt/xOptModel.h"     // xOptModelT / xOptProblemT
 #include "xOpt/xOptProblem.h"   // xOptProblem / createProblemFunc
+
+struct IXOptProblemView;  // 内部：屏蔽 C++/C ABI 差异（定义在 .cpp）
 
 class XOptMINLPAdapter : public ICapeMINLPModel {
   public:
-    explicit XOptMINLPAdapter(const std::string& dll_path);
-    explicit XOptMINLPAdapter(xOptProblem* injected);  // 测试注入，不拥有
+    explicit XOptMINLPAdapter(const std::string& dll_path);  // 自动探测 ABI
+    explicit XOptMINLPAdapter(xOptProblem* injected);        // 注入 C++ 问题（不拥有）
+    explicit XOptMINLPAdapter(const xOptProblemT& injected); // 注入 C vtable（不拥有）
     ~XOptMINLPAdapter() override;
 
-    int connect() override;  // 加载/创建 problem、initialize、缓存规模与结构
+    int connect() override;
     void disconnect() override;
 
     int getSize(CapeMINLPSize& size_out) override;
@@ -52,11 +58,14 @@ class XOptMINLPAdapter : public ICapeMINLPModel {
   private:
     int fail(const std::string& msg) const;
 
+    // 输入来源（connect 时据此建 view_）
     std::string dll_path_;
-    void* module_ = nullptr;                  // HMODULE / dlopen handle
-    destroyProblemFunc destroy_func_ = nullptr;
-    xOptProblem* problem_ = nullptr;
-    bool owns_problem_ = false;               // 由本对象 createProblem 创建则 true
+    xOptProblem* inject_cpp_ = nullptr;
+    bool have_capi_inject_ = false;
+    xOptProblemT inject_capi_{};
+
+    void* module_ = nullptr;  // HMODULE / dlopen handle
+    std::unique_ptr<IXOptProblemView> view_;
     bool initialized_ = false;
 
     CapeMINLPSize size_{};
