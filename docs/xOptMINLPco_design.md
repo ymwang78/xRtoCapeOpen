@@ -81,8 +81,14 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `ICapeIdentification` → 注销。**1/1 通过**（注册失败则 GTEST_SKIP）。验证注入未覆盖的整条
     激活/类厂/生产 ctor/跨 DLL 加载路径。
   - [ ] 待办：真正独立进程的客户端 exe；MINLP CATID 注册（PME 发现）。
-- **N4 — CORBA 前端**：`MINLPServant : POA_SqpSolver::ICapeMINLP` 委托 adapter，导出 IOR；
-  测试：collocated 回环经 capeopen_core 的 CORBA 后端。
+- **N4 — CORBA 前端**  ✅ 已落地（2026-06）
+  - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `SqpSolver::ICapeMINLP` 委托 `ICapeMINLPModel`
+    （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试）。复用 `SqpSolver*` stub + `CapeCorbaMarshal`。
+  - [x] **回环测试**（`tests/test_xoptminlpco_corba.cpp`）：mock → adapter → `MINLPServant`(collocated
+    POA) → capeopen_core `CapeMINLPModelCorba`(注入) → 对拍。**1/1 通过**（vcpkg `ace[tao]` static-md）。
+  - 构建：`-DWITH_XOPTMINLPCO_CORBA=ON -DTAO_TRIPLET_DIR=<…/x64-windows-static-md>`；CMake 经
+    `add_subdirectory(core)` + `WITH_CAPEOPEN_CORBA=ON` 拉起 `capeopen_corba`（含 tao_idl 重生成）。
+  - [ ] 待办：独立进程 CORBA server（导出 IOR/corbaname，跨进程对接真实 ORB 客户端）。
 - **N5 — 扩展输入 + 打包/文档**：再支持 C-ABI 输入（`xOptModel_createModel`/`xOptProblemT`）；
   打包 COM DLL + CORBA server。
 

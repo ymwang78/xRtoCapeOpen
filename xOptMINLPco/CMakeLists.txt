@@ -23,17 +23,26 @@ target_include_directories(xoptminlpco PUBLIC
     ${XOPT_INCLUDE_DIR}    # xOpt/xOptProblem.h
 )
 
-# ---- N2：COM 前端（默认在 Windows 上启用）----
+# ---- 前端开关（Windows）----
 if(WIN32)
     option(WITH_XOPTMINLPCO_COM "Build the COM frontend + xOptMINLPco.dll" ON)
+    option(WITH_XOPTMINLPCO_CORBA "Build the CORBA frontend (needs vcpkg ace[tao])" OFF)
 else()
     set(WITH_XOPTMINLPCO_COM OFF)
+    set(WITH_XOPTMINLPCO_CORBA OFF)
 endif()
-if(WITH_XOPTMINLPCO_COM)
-    # 复用 capeopen_core（含 COM 后端、ICapeMINLP 接口头、VARIANT marshaling、官方 IID）。
-    set(CAPEOPEN_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory(${CAPEOPEN_CORE_DIR} ${CMAKE_BINARY_DIR}/capeopen_core_build)
 
+# ---- 复用 capeopen_core（COM 后端/接口头/marshaling/IID；CORBA 后端/IDL stub）----
+if(WITH_XOPTMINLPCO_COM OR WITH_XOPTMINLPCO_CORBA)
+    set(CAPEOPEN_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    if(WITH_XOPTMINLPCO_CORBA)
+        set(WITH_CAPEOPEN_CORBA ON CACHE BOOL "" FORCE)  # 让 core 构建 capeopen_corba（需 TAO_TRIPLET_DIR）
+    endif()
+    add_subdirectory(${CAPEOPEN_CORE_DIR} ${CMAKE_BINARY_DIR}/capeopen_core_build)
+endif()
+
+# ---- N2：COM 前端 ----
+if(WITH_XOPTMINLPCO_COM)
     add_library(xoptminlpco_com STATIC CoMINLP.cpp)
     target_link_libraries(xoptminlpco_com PUBLIC xoptminlpco capeopen_core)
 
@@ -53,6 +62,13 @@ if(WITH_XOPTMINLPCO_COM)
     target_include_directories(mock_xoptproblem PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests ${XOPT_INCLUDE_DIR})
     set_target_properties(mock_xoptproblem PROPERTIES OUTPUT_NAME "mock_xoptproblem" PREFIX "")
+endif()
+
+# ---- N4：CORBA 前端 ----
+if(WITH_XOPTMINLPCO_CORBA)
+    add_library(xoptminlpco_corba STATIC MINLPServant.cpp)
+    # capeopen_corba PUBLIC 传递 TAO include/defines/libs + 生成的 SqpSolver* stub 头
+    target_link_libraries(xoptminlpco_corba PUBLIC xoptminlpco capeopen_corba)
 endif()
 
 # ---- 单元测试 ----
@@ -83,5 +99,14 @@ if(XOPTMINLPCO_BUILD_TESTS)
         target_include_directories(test_xoptminlpco_register PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         add_dependencies(test_xoptminlpco_register xOptMINLPco mock_xoptproblem)
         add_test(NAME XOptMINLPcoRegisterTest COMMAND test_xoptminlpco_register)
+    endif()
+
+    if(WITH_XOPTMINLPCO_CORBA)
+        # 回环：mock → adapter → MINLPServant → capeopen_core CapeMINLPModelCorba（collocated）
+        add_executable(test_xoptminlpco_corba
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_corba.cpp
+        )
+        target_link_libraries(test_xoptminlpco_corba PRIVATE xoptminlpco_corba GTest::gtest)
+        add_test(NAME XOptMINLPcoCorbaTest COMMAND test_xoptminlpco_corba)
     endif()
 endif()
