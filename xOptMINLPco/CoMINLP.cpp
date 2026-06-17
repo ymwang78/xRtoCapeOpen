@@ -15,7 +15,8 @@
 
 using namespace cape_com;
 
-extern "C" const GUID IID_ICapeMINLP;  // 定义在 capeopen_core/CapeMINLPModelCom.cpp
+extern "C" const GUID IID_ICapeMINLP;            // 定义在 capeopen_core/CapeMINLPModelCom.cpp
+extern "C" const GUID IID_ICapeIdentification;   // 同上
 
 CoMINLP::CoMINLP(ICapeMINLPModel* model) : model_(model) {}
 
@@ -39,7 +40,12 @@ HRESULT STDMETHODCALLTYPE CoMINLP::QueryInterface(REFIID riid, void** ppv) {
     if (ppv == nullptr) return E_POINTER;
     if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, IID_IDispatch) ||
         IsEqualIID(riid, IID_ICapeMINLP)) {
-        *ppv = static_cast<ICapeMINLP*>(this);
+        *ppv = static_cast<ICapeMINLP*>(this);  // IUnknown/IDispatch 经此基类消歧
+        AddRef();
+        return S_OK;
+    }
+    if (IsEqualIID(riid, IID_ICapeIdentification)) {
+        *ppv = static_cast<ICapeIdentification*>(this);
         AddRef();
         return S_OK;
     }
@@ -226,5 +232,25 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintStringAttribute(VARIANT, BS
     return E_NOTIMPL;
 }
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPObjectiveFunctionType(long*) { return E_NOTIMPL; }
+
+// —— ICapeIdentification ——
+HRESULT STDMETHODCALLTYPE CoMINLP::get_ComponentName(BSTR* name) {
+    if (name == nullptr) return E_POINTER;
+    *name = SysAllocString(comp_name_.c_str());
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE CoMINLP::put_ComponentName(BSTR name) {
+    comp_name_ = name ? name : L"";
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE CoMINLP::get_ComponentDescription(BSTR* desc) {
+    if (desc == nullptr) return E_POINTER;
+    *desc = SysAllocString(comp_desc_.c_str());
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE CoMINLP::put_ComponentDescription(BSTR desc) {
+    comp_desc_ = desc ? desc : L"";
+    return S_OK;
+}
 
 #endif  // _WIN32

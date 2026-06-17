@@ -47,6 +47,12 @@ if(WITH_XOPTMINLPCO_COM)
     set_target_properties(xOptMINLPco PROPERTIES
         OUTPUT_NAME "xOptMINLPco" PREFIX ""
         ARCHIVE_OUTPUT_NAME "xOptMINLPco_import")
+
+    # N3 测试夹具：导出 createProblem/destroyProblem 的 xOptProblem DLL（mock）
+    add_library(mock_xoptproblem SHARED ${CMAKE_CURRENT_SOURCE_DIR}/../tests/mock_xoptproblem_dll.cpp)
+    target_include_directories(mock_xoptproblem PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests ${XOPT_INCLUDE_DIR})
+    set_target_properties(mock_xoptproblem PROPERTIES OUTPUT_NAME "mock_xoptproblem" PREFIX "")
 endif()
 
 # ---- 单元测试 ----
@@ -68,5 +74,14 @@ if(XOPTMINLPCO_BUILD_TESTS)
         )
         target_link_libraries(test_xoptminlpco_com PRIVATE xoptminlpco_com GTest::gtest)
         add_test(NAME XOptMINLPcoComTest COMMAND test_xoptminlpco_com)
+
+        # N3：注册 + CoCreateInstance 激活冒烟（用注册的 xOptMINLPco.dll 加载 mock DLL）
+        add_executable(test_xoptminlpco_register
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_register.cpp
+        )
+        target_link_libraries(test_xoptminlpco_register PRIVATE capeopen_core GTest::gtest)
+        target_include_directories(test_xoptminlpco_register PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        add_dependencies(test_xoptminlpco_register xOptMINLPco mock_xoptproblem)
+        add_test(NAME XOptMINLPcoRegisterTest COMMAND test_xoptminlpco_register)
     endif()
 endif()

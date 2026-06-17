@@ -69,7 +69,18 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - [ ] 待办：`ICapeIdentification`（名称/描述）+ MINLP CATID 注册（移交 N3）。
   - 构建注记：DLL 导入库改名 `xOptMINLPco_import.lib` 避免与静态库 `xoptminlpco.lib` 大小写冲突
     （LNK1149）；`<olectl.h>` 提供 `SELFREG_E_CLASS`；本机构建用 `-DVCPKG_APPLOCAL_DEPS=OFF`（applocal 缺 dumpbin）。
-- **N3 — COM 注册 + 跨客户端冒烟**：regsvr32 + 独立客户端 `CoCreateInstance` 验证。
+- **N3 — COM 注册 + 激活冒烟**  ✅ 已落地（2026-06）
+  - [x] `ICapeIdentification`（官方 IID `{678C0990-…}`，名称/描述）加到 `CoMINLP`（多继承
+    `ICapeMINLP`+`ICapeIdentification`，单份 IUnknown/IDispatch 覆盖两个基类）。
+  - [x] `DllRegisterServer`/`DllUnregisterServer` 注册到 **`HKCU\Software\Classes`**（免管理员）。
+    标识 `xOptMINLPcoClsid.h` 共享。
+  - [x] 测试夹具 `tests/mock_xoptproblem_dll.cpp` → `mock_xoptproblem.dll`（导出 createProblem/
+    destroyProblem 返回 MockXOptProblem）。
+  - [x] `tests/test_xoptminlpco_register.cpp`：注册 → `CoCreateInstance(CLSID)` → 类厂 → 生产
+    `CoMINLP()`（经 `XRTO_XOPT_PROBLEM_DLL` 加载 mock DLL）→ 驱动 `ICapeMINLP`(obj=25) +
+    `ICapeIdentification` → 注销。**1/1 通过**（注册失败则 GTEST_SKIP）。验证注入未覆盖的整条
+    激活/类厂/生产 ctor/跨 DLL 加载路径。
+  - [ ] 待办：真正独立进程的客户端 exe；MINLP CATID 注册（PME 发现）。
 - **N4 — CORBA 前端**：`MINLPServant : POA_SqpSolver::ICapeMINLP` 委托 adapter，导出 IOR；
   测试：collocated 回环经 capeopen_core 的 CORBA 后端。
 - **N5 — 扩展输入 + 打包/文档**：再支持 C-ABI 输入（`xOptModel_createModel`/`xOptProblemT`）；

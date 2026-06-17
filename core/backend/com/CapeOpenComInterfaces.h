@@ -27,6 +27,16 @@
 extern "C" const GUID IID_ICapeMINLP;
 extern "C" const GUID IID_ICapeMINLPSystem;
 extern "C" const GUID IID_ICapeMINLPSolverManager;
+// ICapeIdentification {678C0990-7D66-11D2-A67D-00105A42887F}
+extern "C" const GUID IID_ICapeIdentification;
+
+// CAPE-OPEN 通用标识接口（dual）。组件名称/描述。
+struct ICapeIdentification : public IDispatch {
+    virtual HRESULT STDMETHODCALLTYPE get_ComponentName(BSTR* name) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_ComponentName(BSTR name) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_ComponentDescription(BSTR* desc) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_ComponentDescription(BSTR desc) = 0;
+};
 
 // 模型接口（dual，派生自 IDispatch）。方法顺序严格对应官方 tlb。
 struct ICapeMINLP : public IDispatch {

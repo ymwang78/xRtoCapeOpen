@@ -23,7 +23,7 @@
 #include "CapeMINLPModel.h"                     // ICapeMINLPModel（capeopen_core）
 #include "backend/com/CapeOpenComInterfaces.h"  // ICapeMINLP（capeopen_core）
 
-class CoMINLP : public ICapeMINLP {
+class CoMINLP : public ICapeMINLP, public ICapeIdentification {
   public:
     // 生产模式：从环境变量 XRTO_XOPT_PROBLEM_DLL 取被包装 DLL，建 XOptMINLPAdapter 并 connect。
     CoMINLP();
@@ -73,11 +73,19 @@ class CoMINLP : public ICapeMINLP {
     HRESULT STDMETHODCALLTYPE GetMINLPObjectiveFunctionDerivativeValues(BSTR stype,
                                                                         VARIANT* v) override;
 
+    // ICapeIdentification
+    HRESULT STDMETHODCALLTYPE get_ComponentName(BSTR* name) override;
+    HRESULT STDMETHODCALLTYPE put_ComponentName(BSTR name) override;
+    HRESULT STDMETHODCALLTYPE get_ComponentDescription(BSTR* desc) override;
+    HRESULT STDMETHODCALLTYPE put_ComponentDescription(BSTR desc) override;
+
   private:
     LONG ref_ = 1;
     ICapeMINLPModel* model_ = nullptr;            // 当前委托目标
     std::unique_ptr<ICapeMINLPModel> owned_;      // 生产模式下拥有
     std::string init_error_;
+    std::wstring comp_name_ = L"xOpt MINLP";
+    std::wstring comp_desc_ = L"xOpt problem published as CAPE-OPEN MINLP";
 };
 
 #endif  // _WIN32

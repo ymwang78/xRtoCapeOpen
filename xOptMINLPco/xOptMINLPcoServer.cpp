@@ -21,12 +21,12 @@
 #include <string>
 
 #include "CoMINLP.h"
+#include "xOptMINLPcoClsid.h"
 
-// {7B2C9E10-5A3D-4C8E-9F21-0A1B2C3D4E5F}
-static const CLSID CLSID_XOptMINLP = {
-    0x7B2C9E10, 0x5A3D, 0x4C8E, {0x9F, 0x21, 0x0A, 0x1B, 0x2C, 0x3D, 0x4E, 0x5F}};
-static const wchar_t* kProgId = L"xOpt.MINLP.1";
-static const wchar_t* kFriendly = L"xOpt problem published as CAPE-OPEN MINLP";
+static const wchar_t* kProgId = XOPTMINLPCO_PROGID;
+static const wchar_t* kFriendly = XOPTMINLPCO_FRIENDLY;
+// 注册到 HKCU\Software\Classes（无需管理员；CoCreateInstance 经 HKCR 合并视图可见）。
+static const wchar_t* kClassesRoot = L"Software\\Classes\\";
 
 static HMODULE g_module = nullptr;
 static LONG g_lock_count = 0;
@@ -109,23 +109,26 @@ extern "C" HRESULT __stdcall DllRegisterServer() {
     wchar_t path[MAX_PATH] = {0};
     if (GetModuleFileNameW(g_module, path, MAX_PATH) == 0) return SELFREG_E_CLASS;
     const std::wstring clsid = clsidString();
-    const std::wstring clsidKey = L"CLSID\\" + clsid;
+    const std::wstring base = kClassesRoot;
+    const std::wstring clsidKey = base + L"CLSID\\" + clsid;
+    const std::wstring progKey = base + kProgId;
 
     bool ok = true;
-    ok &= setRegValue(HKEY_CLASSES_ROOT, clsidKey, nullptr, kFriendly);
-    ok &= setRegValue(HKEY_CLASSES_ROOT, clsidKey + L"\\InprocServer32", nullptr, path);
-    ok &= setRegValue(HKEY_CLASSES_ROOT, clsidKey + L"\\InprocServer32", L"ThreadingModel",
+    ok &= setRegValue(HKEY_CURRENT_USER, clsidKey, nullptr, kFriendly);
+    ok &= setRegValue(HKEY_CURRENT_USER, clsidKey + L"\\InprocServer32", nullptr, path);
+    ok &= setRegValue(HKEY_CURRENT_USER, clsidKey + L"\\InprocServer32", L"ThreadingModel",
                       L"Apartment");
-    ok &= setRegValue(HKEY_CLASSES_ROOT, clsidKey + L"\\ProgID", nullptr, kProgId);
-    ok &= setRegValue(HKEY_CLASSES_ROOT, std::wstring(kProgId), nullptr, kFriendly);
-    ok &= setRegValue(HKEY_CLASSES_ROOT, std::wstring(kProgId) + L"\\CLSID", nullptr, clsid);
+    ok &= setRegValue(HKEY_CURRENT_USER, clsidKey + L"\\ProgID", nullptr, kProgId);
+    ok &= setRegValue(HKEY_CURRENT_USER, progKey, nullptr, kFriendly);
+    ok &= setRegValue(HKEY_CURRENT_USER, progKey + L"\\CLSID", nullptr, clsid);
     return ok ? S_OK : SELFREG_E_CLASS;
 }
 
 extern "C" HRESULT __stdcall DllUnregisterServer() {
     const std::wstring clsid = clsidString();
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, (L"CLSID\\" + clsid).c_str());
-    RegDeleteTreeW(HKEY_CLASSES_ROOT, kProgId);
+    const std::wstring base = kClassesRoot;
+    RegDeleteTreeW(HKEY_CURRENT_USER, (base + L"CLSID\\" + clsid).c_str());
+    RegDeleteTreeW(HKEY_CURRENT_USER, (base + kProgId).c_str());
     return S_OK;
 }
 
