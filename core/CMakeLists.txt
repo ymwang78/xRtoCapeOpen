@@ -26,6 +26,22 @@ target_include_directories(capeopen_core PUBLIC
     ${XOPT_INCLUDE_DIR}
 )
 
+# ---- COM 后端（design §3.1/§5.2）：默认在 Windows 上启用 ----
+if(WIN32)
+    option(WITH_CAPEOPEN_COM "Build the COM backend (xRtoCapeOpen)" ON)
+else()
+    set(WITH_CAPEOPEN_COM OFF)
+endif()
+if(WITH_CAPEOPEN_COM)
+    target_sources(capeopen_core PRIVATE
+        backend/com/CapeVariantMarshal.cpp
+        backend/com/CapeMINLPModelCom.cpp
+        backend/com/CapeRegisterComBackend.cpp
+    )
+    target_compile_definitions(capeopen_core PUBLIC CAPEOPEN_WITH_COM)
+    target_link_libraries(capeopen_core PUBLIC ole32 oleaut32 uuid)
+endif()
+
 # ---- 单元测试（仅依赖 GTest + capeopen_core，零外部传输依赖）----
 # 注意(MSVC/vcpkg)：测试 TU 的 CRT 运行库必须与所链接的 gtest.lib 一致，
 # 否则 _ITERATOR_DEBUG_LEVEL 不匹配会破坏 std::string 布局，导致 gtest 套件名
@@ -36,10 +52,19 @@ if(CAPEOPEN_CORE_BUILD_TESTS)
     find_package(GTest REQUIRED)
     enable_testing()
 
-    add_executable(test_capeopen_problem
+    set(CAPEOPEN_TEST_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_capeopen_problem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_capeopen_model.cpp
     )
+    if(WITH_CAPEOPEN_COM)
+        # 参考 COM 组件 RefCapeMINLP 只编进测试，不进生产库
+        list(APPEND CAPEOPEN_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_capeopen_com.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/backend/com/RefCapeMINLP.cpp
+        )
+    endif()
+
+    add_executable(test_capeopen_problem ${CAPEOPEN_TEST_SOURCES})
     # 测试文件自带 main()（CLAUDE.md 的 #ifndef USE_GTEST_MAIN 模板），
     # 故只链接 GTest::gtest，不链接 gtest_main，避免 main 重复。
     target_link_libraries(test_capeopen_problem PRIVATE

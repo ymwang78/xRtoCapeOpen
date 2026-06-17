@@ -30,13 +30,29 @@
 #include "xOpt/xOptModel.h"
 
 #include <cstdlib>
+#include <mutex>
 #include <new>
 #include <string>
 
 #include "CapeBackendFactory.h"
 #include "CapeMINLPProblemCore.h"
 
+#ifdef CAPEOPEN_WITH_COM
+void CapeRegisterComBackend();  // backend/com/CapeRegisterComBackend.cpp
+#endif
+
 namespace {
+
+// 一次性把已编译进来的后端注册到工厂（com 在 WIN32+WITH_CAPEOPEN_COM 时）。
+void ensureBackendsRegistered() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+#ifdef CAPEOPEN_WITH_COM
+        CapeRegisterComBackend();
+#endif
+        // mock 为 core 内置，无需注册；corba 后端在其 DLL 内注册（M4）。
+    });
+}
 
 // xOptModelHandle 背后的上下文：只保存解析后的连接串，buildProblem 时按需建后端。
 struct CapeOpenModelContext {
@@ -194,6 +210,7 @@ const char* t_getVersion(xOptModelHandle /*h*/) { return "v1.0.0"; }
 extern "C" XOPTIF_API int xOptModel_createModel(xOptModelT* model, xOptPlatformT* /*platform*/,
                                                 const char* name) {
     if (model == nullptr) return -1;
+    ensureBackendsRegistered();
     CapeOpenModelContext* ctx = new (std::nothrow) CapeOpenModelContext();
     if (ctx == nullptr) return -1;
     ctx->conn = resolveConnection(name);
