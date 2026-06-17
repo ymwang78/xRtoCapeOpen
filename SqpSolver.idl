@@ -1,0 +1,126 @@
+#ifndef SqpSolver_idl
+#define SqpSolver_idl
+module SqpSolver
+{
+    // Primitive common data types
+	typedef boolean CapeBoolean;
+	typedef sequence<CapeBoolean> CapeArrayBoolean;
+	typedef char CapeChar;
+	typedef sequence<CapeChar> CapeArrayChar;
+	typedef short CapeShort;
+	typedef sequence<CapeShort> CapeArrayShort;
+	typedef long CapeLong;
+	typedef sequence<CapeLong> CapeArrayLong;
+	typedef float CapeFloat;
+	typedef sequence<CapeFloat> CapeArrayFloat;
+	typedef double CapeDouble;
+	typedef sequence<CapeDouble> CapeArrayDouble;
+	typedef string CapeString;
+	typedef sequence<CapeString> CapeArrayString;
+	typedef any CapeVariant;
+	typedef sequence<CapeVariant> CapeArrayVariant;
+	typedef Object CapeInterface;
+	typedef sequence<CapeInterface> CapeArrayInterface;
+	
+	// Exceptions
+	exception CapeException
+	{
+		CapeLong type;
+		CapeLong minus;
+		CapeLong completed;
+		CapeString idlmethod;
+		CapeString explanation;
+	};
+	
+	struct CapePublicParameter 
+	{
+		CapeString name;
+		CapeString description;
+		CapeLong lowerBound;
+		CapeLong upperBound;
+		CapeVariant defaultValue;
+		CapeVariant currentValue;
+	};
+	typedef sequence<CapePublicParameter> CapeArrayPublicParameter;
+	
+    //Variable type definition
+	enum ParameterType {is_boolean, is_string, is_long, is_double};
+	
+	//Variable value definition
+	union ParameterValue switch (short)
+	{
+	  case  1: CapeBoolean 	bValue;
+	  case  2: CapeString 	sValue;
+	  case  3: CapeLong		lValue;
+	  case  4: CapeDouble	dValue;
+	};
+	
+    struct SolverParameterDescription{
+        CapeString name;
+        ParameterType type;
+        CapeString group;
+        CapeString domain;
+        ParameterValue value;
+        CapeString description;
+        CapeString fatherParameter;
+        CapeBoolean validCondition;
+    };
+    typedef sequence<SolverParameterDescription> SolverParameterDescriptionSeq;
+
+    struct SolverParameter{
+        CapeString name;
+        ParameterValue value;
+    };
+    typedef sequence<SolverParameter> SolverParameterSeq;
+
+    struct SolutionResult{
+        CapeString solverStatus;
+        CapeLong numOfIterations;
+        CapeLong CPUSeconds;
+        CapeLong numOfFunctionEvals;
+    };
+    typedef sequence<SolutionResult> SolutionResultSeq;
+
+    interface ICapeMINLP {
+        void GetMINLPSize(out CapeLong nv, out CapeLong niv, out CapeLong nlv, out CapeLong nliv, out CapeLong nc, out CapeLong nlc, out CapeLong nlz, out CapeLong nnz, out CapeLong nlzof, out CapeLong nnzof) raises(CapeException);
+        void GetMINLPStructure(in CapeString structuretype, out CapeArrayLong rowindex, out CapeArrayLong columnindex, out CapeArrayLong objindex) raises(CapeException);
+        void GetMINLPVariableNames(in CapeArrayLong vids, out CapeArrayString vnames) raises(CapeException);
+        void GetMINLPVariableDoubleAttribute(in CapeArrayLong vids, in CapeString attrib, out CapeArrayDouble values) raises(CapeException);
+        void GetMINLPVariableBounds(in CapeArrayLong vids,  out CapeArrayDouble lb, out CapeArrayDouble ub) raises(CapeException);
+        void GetMINLPVariableValues(in CapeArrayLong vids,  out CapeArrayDouble values) raises(CapeException);
+        void SetMINLPVariableValues(in CapeArrayLong vids,  in CapeArrayDouble values) raises(CapeException);
+        void GetMINLPConstraintNames(in CapeArrayLong cids, out CapeArrayString cnames) raises(CapeException);
+        void GetMINLPConstraintBounds(in CapeArrayLong cids,  out CapeArrayDouble lb, out CapeArrayDouble ub) raises(CapeException);
+        void GetMINLPConstraintDoubleAttribute(in CapeArrayLong cids, in CapeString attrib, out CapeArrayDouble values) raises(CapeException);
+        void GetMINLPNonlinearConstraintValues(in CapeArrayLong cids, out CapeArrayDouble values) raises(CapeException);
+        void GetMINLPConstraintDerivativeValues(in CapeString structtype, in CapeArrayLong cids, out CapeArrayDouble vals) raises(CapeException);
+        void GetMINLPNonlinearObjectiveFunctionValue(out CapeDouble value) raises(CapeException);
+        void GetMINLPObjectiveFunctionDerivativeValues(in CapeString stype, out CapeArrayDouble v) raises(CapeException);
+        void GetMINLPObjectiveFunctionDoubleAttribute(in CapeString attrib, out CapeDouble value) raises(CapeException);
+        void SetMINLPLagrangeMultipliers(in CapeString lmtype, in CapeArrayLong ids, in CapeArrayDouble values) raises(CapeException);
+        void GetMINLPLagrangeMultipliers(in CapeString lmtype, in CapeArrayLong ids, out CapeArrayDouble values) raises(CapeException);
+    };
+
+    interface ICapeMINLPSystem{
+        void GetParameters(out SolverParameterDescriptionSeq parameters) raises(CapeException);
+        void Solve() raises(CapeException);
+        void SetParameters(in SolverParameterDescriptionSeq parameters) raises(CapeException);
+        void SetProblemID(in CapeLong id) raises(CapeException);
+    };
+
+    interface ICapeMINLPSolverManager{
+        void CreateMINLPSystem(in ICapeMINLP theMINLP, out ICapeMINLPSystem theMINLPSystem) raises(CapeException);
+    };
+
+    interface ISolverParameterTuner{
+        void SetParameterTuningTask(in SolverParameterDescriptionSeq parameterList, in CapeLong numOfOptCases) raises(CapeException);
+        void GetNewParameters(in SolutionResultSeq solutionResult, in CapeString method, out SolverParameterSeq newParamters) raises(CapeException);
+    };
+
+    interface IInitialValueFinder{
+        void Initialize(in CapeLong numOfTotalVariables, in CapeLong numOfKeyVariables, in CapeArrayLong keyVariableIndices, in CapeArrayLong keyVarMeasurementIndices) raises(CapeException);
+        void GetInitialValue(in CapeArrayDouble keyVariableValues, in CapeArrayDouble keyVarMeasurementValues, out CapeArrayDouble newInitialValues) raises(CapeException);
+    };
+};
+#endif
+
