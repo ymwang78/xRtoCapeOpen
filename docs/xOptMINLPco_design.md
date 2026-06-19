@@ -96,6 +96,10 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - [x] `tests/test_xoptminlpco_capi.cpp`：in-proc 填 `xOptProblemT`（二次问题）注入 adapter，对拍。**1/1**。
     既有 C++ ABI 路径（adapter/com/register/corba）重构后全绿（xOptMINLPco 共 8 测试）。
   - 打包：COM 产物 `xOptMINLPco.dll`（N3 可注册激活）；CORBA `MINLPServant`（lib，N4 collocated 验证）。
+  - [x] VS 工程 `xOptMINLPco.vcxproj`(+`.filters`)：直接生成 COM `xOptMINLPco.dll`（v145、x64/Win32、
+    `NotUsing` PCH、`SDLCheck=false`、`/DEF:xOptMINLPco.def`、链接 ole32/oleaut32/uuid）。源含本项目
+    3 文件 + capeopen_core 的 `CapeMINLPModelCom.cpp`/`CapeVariantMarshal.cpp`（官方 IID + VARIANT marshaling）。
+    msbuild Release|x64 验证导出 4 个 COM 入口。CORBA 前端因需环境相关的 TAO 路径，仍由 CMake 构建。
   - [ ] 待办：独立进程 CORBA server（IOR）；MINLP CATID 注册；正式 install 规则。
 
 ## 5. 风险

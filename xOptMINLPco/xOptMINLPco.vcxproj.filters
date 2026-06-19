@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{a1000000-0000-0000-0000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{a1000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="capeopen_core">
+      <UniqueIdentifier>{a1000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="XOptMINLPAdapter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CoMINLP.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="xOptMINLPcoServer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\core\backend\com\CapeMINLPModelCom.cpp">
+      <Filter>capeopen_core</Filter>
+    </ClCompile>
+    <ClCompile Include="..\core\backend\com\CapeVariantMarshal.cpp">
+      <Filter>capeopen_core</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="XOptMINLPAdapter.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CoMINLP.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="xOptMINLPcoClsid.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\core\CapeMINLPModel.h">
+      <Filter>capeopen_core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\core\backend\com\CapeOpenComInterfaces.h">
+      <Filter>capeopen_core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\core\backend\com\CapeVariantMarshal.h">
+      <Filter>capeopen_core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\core\backend\com\CapeMINLPModelCom.h">
+      <Filter>capeopen_core</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="xOptMINLPco.def" />
+  </ItemGroup>
+</Project>
