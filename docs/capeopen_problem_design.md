@@ -1,4 +1,4 @@
-﻿# xRtoCapeOpen 设计文档：把 CAPE-OPEN MINLP DLL 包装为 xOptProblem
+# xRtoCapeOpen 设计文档：把 CAPE-OPEN MINLP DLL 包装为 xOptProblem
 
 > 版本 v3 · 2026-06-15 · 适用模块：`libsrc/xRtoCapeOpen`、`libsrc/xOpt`
 >
