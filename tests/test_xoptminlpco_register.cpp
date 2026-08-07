@@ -16,6 +16,7 @@
 #ifdef _WIN32
 
 #include <windows.h>
+#include <comcat.h>  // ICatInformation：按类别枚举组件，即 PME 的发现路径
 
 #include <gtest/gtest.h>
 
@@ -102,8 +103,58 @@ TEST(XOptMINLPcoRegister, ActivateViaCoCreateInstance) {
     ident->Release();
 
     minlp->Release();
+
+    // —— 类别注册：PME 发现组件走的就是这条路（issue #5）——
+    // 断言的不是「注册表里有那个键」，而是**按类别枚举能不能找到本组件**，
+    // 那才是 PME 实际做的事。
+    {
+        ICatInformation* cat = nullptr;
+        HRESULT chr = CoCreateInstance(CLSID_StdComponentCategoriesMgr, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_ICatInformation, reinterpret_cast<void**>(&cat));
+        ASSERT_EQ(chr, S_OK) << "拿不到组件类别管理器 hr=0x" << std::hex << chr;
+
+        CATID want = CATID_CapeOpenComponent;
+        IEnumCLSID* e = nullptr;
+        ASSERT_EQ(cat->EnumClassesOfCategories(1, &want, 0, nullptr, &e), S_OK);
+
+        bool found = false;
+        CLSID got;
+        ULONG fetched = 0;
+        while (e->Next(1, &got, &fetched) == S_OK && fetched == 1) {
+            if (IsEqualCLSID(got, CLSID_XOptMINLP)) { found = true; break; }
+        }
+        e->Release();
+        cat->Release();
+        EXPECT_TRUE(found) << "按 CAPE-OPEN Component 类别枚举不到本组件——PME 也就发现不了它";
+    }
+
     CoUninitialize();
     unreg();
+
+    // 注销后必须枚举不到，否则会留下指向已卸载组件的陈旧条目。
+    {
+        ASSERT_EQ(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), S_OK);
+        ICatInformation* cat = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_StdComponentCategoriesMgr, nullptr,
+                                       CLSCTX_INPROC_SERVER, IID_ICatInformation,
+                                       reinterpret_cast<void**>(&cat)))) {
+            CATID want = CATID_CapeOpenComponent;
+            IEnumCLSID* e = nullptr;
+            if (SUCCEEDED(cat->EnumClassesOfCategories(1, &want, 0, nullptr, &e))) {
+                bool still = false;
+                CLSID got;
+                ULONG fetched = 0;
+                while (e->Next(1, &got, &fetched) == S_OK && fetched == 1) {
+                    if (IsEqualCLSID(got, CLSID_XOptMINLP)) { still = true; break; }
+                }
+                e->Release();
+                EXPECT_FALSE(still) << "注销后仍能枚举到——留下了陈旧的类别条目";
+            }
+            cat->Release();
+        }
+        CoUninitialize();
+    }
+
     FreeLibrary(dll);
 }
 

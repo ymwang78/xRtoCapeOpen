@@ -105,6 +105,25 @@ extern "C" HRESULT __stdcall DllCanUnloadNow() {
     return g_lock_count == 0 ? S_OK : S_FALSE;
 }
 
+// CAPE-OPEN 的「Implemented Categories」是 PME 发现组件的入口（issue #5）。
+//
+// 这里直接写注册表键，而不是走 ICatRegister：`ICatRegister::RegisterClassImplCategories`
+// 只往 **HKCR**（实为 HKLM）写，需要管理员权限；而本组件其余部分刻意注册在
+// HKCU\Software\Classes 以便免管理员安装。两者混用会得到一个「类注册在 HKCU、
+// 类别注册在 HKLM」的半吊子状态，卸载时还清不干净。
+//
+// 写的键与 Methods&Tools 文档 Figure 13 的 .reg 示例逐字一致：
+//   CLSID\{…}\Implemented Categories\{类别 GUID}
+// PME 经 HKCR 合并视图能读到 HKCU 这一份。
+bool registerCategory(const std::wstring& clsidKey, const CATID& catid) {
+    LPOLESTR cat = nullptr;
+    if (FAILED(StringFromCLSID(catid, &cat)) || cat == nullptr) return false;
+    const bool ok = setRegValue(HKEY_CURRENT_USER,
+                                clsidKey + L"\\Implemented Categories\\" + cat, nullptr, L"");
+    CoTaskMemFree(cat);
+    return ok;
+}
+
 extern "C" HRESULT __stdcall DllRegisterServer() {
     wchar_t path[MAX_PATH] = {0};
     if (GetModuleFileNameW(g_module, path, MAX_PATH) == 0) return SELFREG_E_CLASS;
@@ -121,12 +140,26 @@ extern "C" HRESULT __stdcall DllRegisterServer() {
     ok &= setRegValue(HKEY_CURRENT_USER, clsidKey + L"\\ProgID", nullptr, kProgId);
     ok &= setRegValue(HKEY_CURRENT_USER, progKey, nullptr, kFriendly);
     ok &= setRegValue(HKEY_CURRENT_USER, progKey + L"\\CLSID", nullptr, clsid);
+
+    // 类别：只注册通用的「CAPE-OPEN Component」。规范文档集里没有 MINLP 专用类别，
+    // 详见 xOptMINLPcoClsid.h 顶部的出处说明——不臆造 GUID。
+    ok &= registerCategory(clsidKey, CATID_CapeOpenComponent);
+
+    // CapeDescription：PME 用它展示组件信息（Figure 13）。
+    const std::wstring desc = clsidKey + L"\\CapeDescription";
+    ok &= setRegValue(HKEY_CURRENT_USER, desc, L"Name", kProgId);
+    ok &= setRegValue(HKEY_CURRENT_USER, desc, L"Description", kFriendly);
+    ok &= setRegValue(HKEY_CURRENT_USER, desc, L"CapeVersion", XOPTMINLPCO_CAPE_VERSION);
+    ok &= setRegValue(HKEY_CURRENT_USER, desc, L"ComponentVersion", XOPTMINLPCO_COMPONENT_VERSION);
+    ok &= setRegValue(HKEY_CURRENT_USER, desc, L"About", XOPTMINLPCO_ABOUT);
+
     return ok ? S_OK : SELFREG_E_CLASS;
 }
 
 extern "C" HRESULT __stdcall DllUnregisterServer() {
     const std::wstring clsid = clsidString();
     const std::wstring base = kClassesRoot;
+    // RegDeleteTreeW 递归删除，Implemented Categories / CapeDescription 一并清掉。
     RegDeleteTreeW(HKEY_CURRENT_USER, (base + L"CLSID\\" + clsid).c_str());
     RegDeleteTreeW(HKEY_CURRENT_USER, (base + kProgId).c_str());
     return S_OK;
