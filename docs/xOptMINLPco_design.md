@@ -193,7 +193,11 @@ module CAPEOPEN100 {
 
 **缺口 2 —— 索引基（致命，且回环测试永远抓不到）**。规范全篇 20 处明写
 「Constraints and variables in the MINLP are numbered starting from 1」、`vids` 合法范围 `1,...,nv`。
-**我们全线 0-based**：`CapeMINLPProblemCore::allVariableIds()` 生成 `0..nv-1` 直接当 `vids` 发出去；
+
+> 以下描述的是**发现缺口时的状态**。CORBA 侧已于 §6.3 步骤 2 修复，COM 侧已于 §6.5 修复
+> （issue #2），两个绑定现在都是 1-based。这段保留，是因为它记录了这类缺陷为什么能活这么久。
+
+当时**全线 0-based**：`CapeMINLPProblemCore::allVariableIds()` 生成 `0..nv-1` 直接当 `vids` 发出去；
 `XOptMINLPAdapter::pick()` 按 0-based 取；`GetMINLPStructure` 的 rowindex/columnindex 直接透传
 xOptProblem 的 0-based 下标。全程无转换。
 

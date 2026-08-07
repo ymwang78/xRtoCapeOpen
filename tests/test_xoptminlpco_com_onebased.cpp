@@ -85,15 +85,24 @@ std::vector<double> readDoubles(const VARIANT& v) {
     return out;
 }
 
-std::string firstBstr(const VARIANT& v) {
+std::string nthBstr(const VARIANT& v, LONG index) {
     if ((v.vt & VT_ARRAY) == 0 || v.parray == nullptr) return {};
     LONG lo = 0;
     SafeArrayGetLBound(v.parray, 1, &lo);
+    lo += index;
     BSTR b = nullptr;
     if (FAILED(SafeArrayGetElement(v.parray, &lo, &b)) || b == nullptr) return {};
+    // 用 -1 求长度时返回值**含**终止符。原先按 n-1 建 string 再让 API 写 n 字节，
+    // 那一个字节落在 data()[size()]——标准规定该槽位不得修改。实测无害，但没必要
+    // 押在这个细节上：这里改用独立缓冲，再按不含终止符的长度构造。
     const int n = WideCharToMultiByte(CP_UTF8, 0, b, -1, nullptr, 0, nullptr, nullptr);
-    std::string s(n > 0 ? n - 1 : 0, '\0');
-    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, b, -1, &s[0], n, nullptr, nullptr);
+    std::string s;
+    if (n > 1) {
+        std::vector<char> buf(static_cast<size_t>(n));
+        const int written =
+            WideCharToMultiByte(CP_UTF8, 0, b, -1, buf.data(), n, nullptr, nullptr);
+        if (written > 1) s.assign(buf.data(), static_cast<size_t>(written - 1));
+    }
     SysFreeString(b);
     return s;
 }
@@ -119,10 +128,8 @@ TEST_F(ComOneBasedTest, VariableIdsAreOneBasedOnTheWire) {
     VariantInit(&names);
     ASSERT_EQ(co_->GetMINLPVariableNames(ids, &names), S_OK);
     ASSERT_EQ((names.vt & VT_ARRAY), VT_ARRAY);
-    LONG lo = 0, hi = -1;
-    SafeArrayGetLBound(names.parray, 1, &lo);
-    SafeArrayGetUBound(names.parray, 1, &hi);
-    EXPECT_EQ(hi - lo + 1, 2);
+    EXPECT_EQ(nthBstr(names, 0), "x0");
+    EXPECT_EQ(nthBstr(names, 1), "x1");
     VariantClear(&names);
     VariantClear(&ids);
 
@@ -131,7 +138,7 @@ TEST_F(ComOneBasedTest, VariableIdsAreOneBasedOnTheWire) {
     VARIANT second;
     VariantInit(&second);
     ASSERT_EQ(co_->GetMINLPVariableNames(one, &second), S_OK);
-    EXPECT_EQ(firstBstr(second), "x1") << "线上 id=2 应对应 x1，拿到别的说明没换基";
+    EXPECT_EQ(nthBstr(second, 0), "x1") << "线上 id=2 应对应 x1，拿到别的说明没换基";
     VariantClear(&second);
     VariantClear(&one);
 }
@@ -225,13 +232,40 @@ TEST_F(ComOneBasedTest, EmptyIdListMeansAll) {
     VARIANT names;
     VariantInit(&names);
     ASSERT_EQ(co_->GetMINLPVariableNames(empty, &names), S_OK);
-    LONG lo = 0, hi = -1;
     ASSERT_EQ((names.vt & VT_ARRAY), VT_ARRAY);
-    SafeArrayGetLBound(names.parray, 1, &lo);
-    SafeArrayGetUBound(names.parray, 1, &hi);
-    EXPECT_EQ(hi - lo + 1, 2) << "空数组应表示全部两个变量";
+    EXPECT_EQ(nthBstr(names, 0), "x0") << "空数组应表示全部两个变量";
+    EXPECT_EQ(nthBstr(names, 1), "x1");
     VariantClear(&names);
     VariantClear(&empty);
+}
+
+// 与 Jacobian 同一条出网路径，但走的是 objindex 那一路，一并钉住。
+TEST_F(ComOneBasedTest, ObjectiveGradientStructureIsOneBased) {
+    BSTR t = SysAllocString(L"ObjectiveGradient");
+    VARIANT r, c, o;
+    VariantInit(&r);
+    VariantInit(&c);
+    VariantInit(&o);
+    ASSERT_EQ(co_->GetMINLPStructure(t, &r, &c, &o), S_OK);
+    EXPECT_EQ(readLongs(o), (std::vector<LONG>{1, 2}));
+    VariantClear(&r);
+    VariantClear(&c);
+    VariantClear(&o);
+    SysFreeString(t);
+}
+
+// 「全部」的另一种写法：VT_EMPTY（VB/脚本宿主省略参数时就是这个）。
+// 消费端 softReadIndices 早就把「不是数组」当空处理，生产端也须一致。
+TEST_F(ComOneBasedTest, NonArrayVariantAlsoMeansAll) {
+    VARIANT empty;
+    VariantInit(&empty);  // VT_EMPTY
+    VARIANT names;
+    VariantInit(&names);
+    ASSERT_EQ(co_->GetMINLPVariableNames(empty, &names), S_OK)
+        << "VT_EMPTY 应被当作「全部」，而不是非法入参";
+    EXPECT_EQ(nthBstr(names, 0), "x0");
+    EXPECT_EQ(nthBstr(names, 1), "x1");
+    VariantClear(&names);
 }
 
 }  // namespace

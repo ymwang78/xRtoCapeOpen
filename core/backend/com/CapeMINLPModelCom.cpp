@@ -33,7 +33,9 @@ namespace {
 // 请另加一个不换基的函数，而不是复用这个——见 CapeVariantMarshal.h 顶部。
 void softReadIndices(const VARIANT& v, std::vector<int>& out) {
     if ((v.vt & VT_ARRAY) == 0) { out.clear(); return; }
-    readIndicesFromWire(v, out);
+    // 「软」指的是「不是数组就当空」，不是「解析失败也照单全收」：
+    // 解析失败时必须清空，否则半截的索引会被当成真实结构继续往下传。
+    if (!readIndicesFromWire(v, out)) out.clear();
 }
 void softReadDouble(const VARIANT& v, std::vector<double>& out) {
     if ((v.vt & VT_ARRAY) == 0) { out.clear(); return; }
