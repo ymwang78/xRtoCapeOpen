@@ -205,12 +205,55 @@ TEST_F(OneBasedWireTest, NarrowsToICapeIdentificationAsAPmeWould) {
 
 // 没实现的方法要明确报「未实现」，而不是返回一个看着像真答案的空值。
 TEST_F(OneBasedWireTest, UnimplementedMethodsSaySoRatherThanFakeAnAnswer) {
-    ct::CapeArrayBoolean_var isint;
-    EXPECT_THROW(minlp_->GetMINLPVariableTypes(wireIds({1, 2}), isint.out()),
-                 CORBA::NO_IMPLEMENT);
-
     ct::CapeArrayDouble_var hv;
     EXPECT_THROW(minlp_->GetMINLPHessianValues(hv.out()), cm::ECapeHessianInfoNotAvailable);
+
+    ct::CapeArrayLong_var iattr;
+    EXPECT_THROW(minlp_->GetMINLPVariableIntegerAttribute(wireIds({1}), "anything", iattr.out()),
+                 CORBA::NO_IMPLEMENT);
+}
+
+// 变量类型/约束线性性不再抛 NO_IMPLEMENT：GetMINLPSize 已上报 niv=0 / nlc=0，
+// 所以「全连续」「全非线性」是从已上报值推导出来的，不是编造。
+// 很多求解器会无条件查这两项，抛异常会让它们直接中止。
+TEST_F(OneBasedWireTest, TypesAndLinearityAreDerivedFromTheReportedSize) {
+    CORBA::Long nv, niv, nlv, nliv, nc, nlc, nlz, nnz, nlzof, nnzof;
+    minlp_->GetMINLPSize(nv, niv, nlv, nliv, nc, nlc, nlz, nnz, nlzof, nnzof);
+    ASSERT_EQ(niv, 0) << "本用例的前提是模型上报 niv == 0";
+    ASSERT_EQ(nlc, 0) << "本用例的前提是模型上报 nlc == 0";
+
+    ct::CapeArrayBoolean_var isint;
+    minlp_->GetMINLPVariableTypes(wireIds({1, 2}), isint.out());
+    ASSERT_EQ(isint->length(), 2u);
+    EXPECT_FALSE(isint[0u]);
+    EXPECT_FALSE(isint[1u]);
+
+    ct::CapeArrayBoolean_var islin;
+    minlp_->GetMINLPConstraintLinearity(wireIds({1}), islin.out());
+    ASSERT_EQ(islin->length(), 1u);
+    EXPECT_FALSE(islin[0u]);
+}
+
+// 规范：GetMINLPConstraintDerivativeValues 取的是 cids 指定的**子集**。
+// 原先 adapter 整个忽略 cids、永远返回整表，客户端要子集会静默拿到全表。
+TEST_F(OneBasedWireTest, ConstraintDerivativesHonourTheRequestedSubset) {
+    ct::CapeArrayDouble v;
+    v.length(2);
+    v[0u] = 3.0;
+    v[1u] = 4.0;
+    minlp_->SetMINLPVariableValues(wireIds({1, 2}), v);
+
+    // mock 只有 1 个约束、Jacobian 两个非零（行都是该约束），子集=全集，长度 2
+    ct::CapeArrayDouble_var jac;
+    minlp_->GetMINLPConstraintDerivativeValues("Jacobian", wireIds({1}), jac.out());
+    ASSERT_EQ(jac->length(), 2u);
+    EXPECT_DOUBLE_EQ(jac[0u], 1.0);
+    EXPECT_DOUBLE_EQ(jac[1u], 1.0);
+
+    // 空 cids 依约定表示「全部」，结果应一致
+    ct::CapeArrayDouble_var all;
+    minlp_->GetMINLPConstraintDerivativeValues("Jacobian", wireIds({}), all.out());
+    EXPECT_EQ(all->length(), jac->length());
 }
 
 }  // namespace

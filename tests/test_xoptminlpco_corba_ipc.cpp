@@ -38,6 +38,15 @@
 #include <thread>
 #include <vector>
 
+// 进程拉起/收尸只有 Win32 实现。今天这不会发生：xOptMINLPco/CMakeLists.txt 在
+// 非 WIN32 上把 WITH_XOPTMINLPCO_CORBA 强制置 OFF，整个 CORBA 测试块（含本文件）
+// 根本不会注册。但那个前提隔着一个文件，将来谁在 POSIX 上打开 CORBA 时，
+// 本文件会安静地编过、然后在 started_ 恒 false 上运行期失败。
+// 把假设写在这里，让那天变成一条编译期错误。
+#ifndef _WIN32
+#    error "test_xoptminlpco_corba_ipc needs a POSIX spawn/kill path before it can run here"
+#endif
+
 void CapeRegisterCorbaBackend();  // backend/corba/CapeRegisterCorbaBackend.cpp
 
 namespace {

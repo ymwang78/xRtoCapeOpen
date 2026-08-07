@@ -58,16 +58,33 @@ std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
     return ids;
 }
 
-int variableCount(ICapeMINLPModel* m) {
-    CapeMINLPSize s;
-    if (!m || m->getSize(s) < 0) throw CORBA::INTERNAL();
-    return s.num_variables;
+// 模型侧失败同样抛 IDL 里声明过的 ECapeUnknown，而不是 CORBA::INTERNAL 系统异常。
+// 理由与 ECapeInvalidArgument 一致：每个操作都声明了 raises(...ECapeUnknown)，
+// 第三方 CO 客户端 catch 的是它。
+[[noreturn]] void throwUnknown(const char* operation, const std::string& what) {
+    throw ::CAPEOPEN100::Common::Error::ECapeUnknown(
+        /*name*/ "ECapeUnknown",
+        /*code*/ 0,
+        /*description*/ what.c_str(),
+        /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
+        /*interfaceName*/ "ICapeMINLP",
+        /*operation*/ operation,
+        /*moreInfo*/ "");
 }
 
-int constraintCount(ICapeMINLPModel* m) {
+CapeMINLPSize sizeOf(ICapeMINLPModel* m, const char* operation) {
     CapeMINLPSize s;
-    if (!m || m->getSize(s) < 0) throw CORBA::INTERNAL();
-    return s.num_constraints;
+    if (!m) throwUnknown(operation, "the servant has no model attached");
+    if (m->getSize(s) < 0) throwUnknown(operation, "the model failed to report its size");
+    return s;
+}
+
+int variableCount(ICapeMINLPModel* m, const char* operation) {
+    return sizeOf(m, operation).num_variables;
+}
+
+int constraintCount(ICapeMINLPModel* m, const char* operation) {
+    return sizeOf(m, operation).num_constraints;
 }
 
 }  // namespace
@@ -92,7 +109,8 @@ void MINLPServant::GetMINLPSize(ct::CapeLong_out nv, ct::CapeLong_out niv, ct::C
                                 ct::CapeLong_out nlz, ct::CapeLong_out nnz, ct::CapeLong_out nlzof,
                                 ct::CapeLong_out nnzof) {
     CapeMINLPSize s;
-    if (!model_ || model_->getSize(s) < 0) throw CORBA::INTERNAL();
+    if (!model_) throwUnknown("GetMINLPSize", "the servant has no model attached");
+    if (model_->getSize(s) < 0) throwUnknown("GetMINLPSize", "the model failed to report its size");
     nv = s.num_variables;
     niv = s.num_integer_variables;
     nlv = s.num_linear_variables;
@@ -109,7 +127,8 @@ void MINLPServant::GetMINLPStructure(const char* structuretype, ct::CapeArrayLon
                                      ct::CapeArrayLong_out columnindex,
                                      ct::CapeArrayLong_out objindex) {
     std::vector<int> r, c, o;
-    if (!model_ || model_->getStructure(structuretype, r, c, o) < 0) throw CORBA::INTERNAL();
+    if (!model_ || model_->getStructure(structuretype, r, c, o) < 0)
+        throwUnknown("GetMINLPStructure", "the model rejected getStructure");
     // 内部 0-based -> 线上 1-based。
     rowindex = new ct::CapeArrayLong(indicesToWire(r));
     columnindex = new ct::CapeArrayLong(indicesToWire(c));
@@ -120,16 +139,28 @@ void MINLPServant::GetMINLPStructure(const char* structuretype, ct::CapeArrayLon
 
 void MINLPServant::GetMINLPVariableNames(const ct::CapeArrayLong& vids,
                                          ct::CapeArrayString_out vnames) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableNames", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableNames"), "GetMINLPVariableNames", "vids");
     std::vector<std::string> names;
-    if (model_->getVariableNames(ids, names) < 0) throw CORBA::INTERNAL();
+    if (model_->getVariableNames(ids, names) < 0)
+        throwUnknown("GetMINLPVariableNames", "the model rejected getVariableNames");
     vnames = new ct::CapeArrayString(toStringSeq(names));
 }
 
-void MINLPServant::GetMINLPVariableTypes(const ct::CapeArrayLong& /*vids*/,
-                                         ct::CapeArrayBoolean_out /*isinteger*/) {
-    // ICapeMINLPModel 没有整数变量的概念；返回「全连续」会是编造的答案。
-    throw CORBA::NO_IMPLEMENT();
+// 先前这里抛 NO_IMPLEMENT，理由是「返回全连续是编造的答案」。那个理由站不住：
+// GetMINLPSize 已经上报 niv（整数变量数）。niv == 0 时「这些变量都是连续的」
+// 是从我们自己刚说过的话里**推导**出来的，不是编造——反倒是抛 NO_IMPLEMENT
+// 会让无条件查询这一项的求解器直接中止。
+//
+// niv > 0 时我们确实不知道是哪几个是整数（ICapeMINLPModel 没这个概念），
+// 那才是真的答不上来，仍抛 NO_IMPLEMENT。
+void MINLPServant::GetMINLPVariableTypes(const ct::CapeArrayLong& vids,
+                                         ct::CapeArrayBoolean_out isinteger) {
+    const CapeMINLPSize s = sizeOf(model_, "GetMINLPVariableTypes");
+    if (s.num_integer_variables != 0) throw CORBA::NO_IMPLEMENT();
+    const std::vector<int> ids =
+        wireIdsToInternal(vids, s.num_variables, "GetMINLPVariableTypes", "vids");
+    const size_t n = ids.empty() ? static_cast<size_t>(s.num_variables) : ids.size();
+    isinteger = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
 
 void MINLPServant::GetMINLPVariableBooleanAttribute(const ct::CapeArrayLong& /*vids*/,
@@ -158,52 +189,64 @@ void MINLPServant::GetMINLPVariableStringAttribute(const ct::CapeArrayLong& /*vi
 
 void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out LB, ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableBounds", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableBounds"), "GetMINLPVariableBounds", "vids");
     std::vector<double> lo, hi;
-    if (model_->getVariableBounds(ids, lo, hi) < 0) throw CORBA::INTERNAL();
+    if (model_->getVariableBounds(ids, lo, hi) < 0)
+        throwUnknown("GetMINLPVariableBounds", "the model rejected getVariableBounds");
     LB = new ct::CapeArrayDouble(toDoubleSeq(lo));
     UB = new ct::CapeArrayDouble(toDoubleSeq(hi));
 }
 
 void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableValues"), "GetMINLPVariableValues", "vids");
     std::vector<double> v;
-    if (model_->getVariableValues(ids, v) < 0) throw CORBA::INTERNAL();
+    if (model_->getVariableValues(ids, v) < 0)
+        throwUnknown("GetMINLPVariableValues", "the model rejected getVariableValues");
     values = new ct::CapeArrayDouble(toDoubleSeq(v));
 }
 
 void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           const ct::CapeArrayDouble& values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "SetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "SetMINLPVariableValues"), "SetMINLPVariableValues", "vids");
     std::vector<double> v;
     fromDoubleSeq(values, v);
-    if (model_->setVariableValues(ids, v) < 0) throw CORBA::INTERNAL();
+    if (model_->setVariableValues(ids, v) < 0)
+        throwUnknown("SetMINLPVariableValues", "the model rejected setVariableValues");
 }
 
 // -------------------------------------------------------------------- 约束
 
 void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
                                            ct::CapeArrayString_out cnames) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintNames", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintNames"), "GetMINLPConstraintNames", "cids");
     std::vector<std::string> names;
-    if (model_->getConstraintNames(ids, names) < 0) throw CORBA::INTERNAL();
+    if (model_->getConstraintNames(ids, names) < 0)
+        throwUnknown("GetMINLPConstraintNames", "the model rejected getConstraintNames");
     cnames = new ct::CapeArrayString(toStringSeq(names));
 }
 
 void MINLPServant::GetMINLPConstraintBounds(const ct::CapeArrayLong& cids,
                                             ct::CapeArrayDouble_out LB,
                                             ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintBounds", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintBounds"), "GetMINLPConstraintBounds", "cids");
     std::vector<double> lo, hi;
-    if (model_->getConstraintBounds(ids, lo, hi) < 0) throw CORBA::INTERNAL();
+    if (model_->getConstraintBounds(ids, lo, hi) < 0)
+        throwUnknown("GetMINLPConstraintBounds", "the model rejected getConstraintBounds");
     LB = new ct::CapeArrayDouble(toDoubleSeq(lo));
     UB = new ct::CapeArrayDouble(toDoubleSeq(hi));
 }
 
-void MINLPServant::GetMINLPConstraintLinearity(const ct::CapeArrayLong& /*cids*/,
-                                               ct::CapeArrayBoolean_out /*islinear*/) {
-    throw CORBA::NO_IMPLEMENT();
+// 同 GetMINLPVariableTypes：nlc（线性约束数）已上报，nlc == 0 时
+// 「这些约束都不是线性的」是推导出来的，不是编造。
+void MINLPServant::GetMINLPConstraintLinearity(const ct::CapeArrayLong& cids,
+                                               ct::CapeArrayBoolean_out islinear) {
+    const CapeMINLPSize s = sizeOf(model_, "GetMINLPConstraintLinearity");
+    if (s.num_linear_constraints != 0) throw CORBA::NO_IMPLEMENT();
+    const std::vector<int> ids =
+        wireIdsToInternal(cids, s.num_constraints, "GetMINLPConstraintLinearity", "cids");
+    const size_t n = ids.empty() ? static_cast<size_t>(s.num_constraints) : ids.size();
+    islinear = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
 
 void MINLPServant::GetMINLPConstraintBooleanAttribute(const ct::CapeArrayLong& /*cids*/,
@@ -232,18 +275,20 @@ void MINLPServant::GetMINLPConstraintStringAttribute(const ct::CapeArrayLong& /*
 
 void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& cids,
                                                      ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPNonlinearConstraintValues", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPNonlinearConstraintValues"), "GetMINLPNonlinearConstraintValues", "cids");
     std::vector<double> v;
-    if (model_->getNonlinearConstraintValues(ids, v) < 0) throw CORBA::INTERNAL();
+    if (model_->getNonlinearConstraintValues(ids, v) < 0)
+        throwUnknown("GetMINLPNonlinearConstraintValues", "the model rejected getNonlinearConstraintValues");
     values = new ct::CapeArrayDouble(toDoubleSeq(v));
 }
 
 void MINLPServant::GetMINLPConstraintDerivativeValues(const char* structtype,
                                                       const ct::CapeArrayLong& cids,
                                                       ct::CapeArrayDouble_out vals) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintDerivativeValues", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintDerivativeValues"), "GetMINLPConstraintDerivativeValues", "cids");
     std::vector<double> v;
-    if (model_->getConstraintDerivativeValues(structtype, ids, v) < 0) throw CORBA::INTERNAL();
+    if (model_->getConstraintDerivativeValues(structtype, ids, v) < 0)
+        throwUnknown("GetMINLPConstraintDerivativeValues", "the model rejected getConstraintDerivativeValues");
     vals = new ct::CapeArrayDouble(toDoubleSeq(v));
 }
 
@@ -257,14 +302,16 @@ void MINLPServant::GetMINLPObjectiveFunctionType(
 
 void MINLPServant::GetMINLPNonlinearObjectiveFunctionValue(ct::CapeDouble_out value) {
     double v = 0;
-    if (!model_ || model_->getObjectiveValue(v) < 0) throw CORBA::INTERNAL();
+    if (!model_ || model_->getObjectiveValue(v) < 0)
+        throwUnknown("GetMINLPNonlinearObjectiveFunctionValue", "the model rejected getObjectiveValue");
     value = v;
 }
 
 void MINLPServant::GetMINLPObjectiveFunctionDerivativeValues(const char* stype,
                                                              ct::CapeArrayDouble_out v) {
     std::vector<double> g;
-    if (!model_ || model_->getObjectiveDerivativeValues(stype, g) < 0) throw CORBA::INTERNAL();
+    if (!model_ || model_->getObjectiveDerivativeValues(stype, g) < 0)
+        throwUnknown("GetMINLPObjectiveFunctionDerivativeValues", "the model rejected getObjectiveDerivativeValues");
     v = new ct::CapeArrayDouble(toDoubleSeq(g));
 }
 

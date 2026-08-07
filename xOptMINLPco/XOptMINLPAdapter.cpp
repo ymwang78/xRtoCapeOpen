@@ -399,16 +399,48 @@ int XOptMINLPAdapter::getNonlinearConstraintValues(const std::vector<int>& cids,
     return 0;
 }
 
+// 规范：「Obtain the values of the first partial derivatives of **a subset** of the
+// MINLP constraints (corresponding to a specified list of indices, cids)」，且
+// 「The row and column indices of the elements of the vector can be obtained from
+// method GetMINLPStructure」。
+//
+// 原先这里整个忽略 cids，永远返回整表 nnz：客户端要第 3 个约束的导数，拿到的是
+// 全部约束的导数，长度和含义都不是它要的，且**毫无征兆**。这是本 PR 一直在清理
+// 的那类「静默地给出错误答案」。
+//
+// 现在按 cids 过滤：保留行下标落在子集里的条目，顺序与 getStructure 返回的结构
+// 一致，客户端用同样的方式过滤 rowindex/columnindex 就能对上。
+// 空 cids 依约定表示「全部」。
 int XOptMINLPAdapter::getConstraintDerivativeValues(const std::string& type,
-                                                    const std::vector<int>& /*cids*/,
+                                                    const std::vector<int>& cids,
                                                     std::vector<double>& values_out) {
     if (!initialized_) return fail("getConstraintDerivativeValues: not connected");
     if (type != cape::kStructJacobian && type != cape::kDerivNonlinear)
         return fail("getConstraintDerivativeValues: unsupported type " + type);
+
     const int nnz = static_cast<int>(jac_rowidx_.size());
-    values_out.assign(nnz, 0.0);
-    if (nnz > 0 && view_->evaluateConstraintsJacobianValues(values_out.data(), nnz) < 0)
+    std::vector<double> all(nnz, 0.0);
+    if (nnz > 0 && view_->evaluateConstraintsJacobianValues(all.data(), nnz) < 0)
         return fail("getConstraintDerivativeValues: evaluateConstraintsJacobianValues failed");
+
+    if (cids.empty()) {
+        values_out = all;
+        return 0;
+    }
+
+    std::vector<char> wanted(size_.num_constraints > 0 ? size_.num_constraints : 0, 0);
+    for (int id : cids) {
+        if (id < 0 || id >= size_.num_constraints)
+            return fail("getConstraintDerivativeValues: cid out of range");
+        wanted[id] = 1;
+    }
+    values_out.clear();
+    values_out.reserve(all.size());
+    for (int k = 0; k < nnz; ++k) {
+        const int row = jac_rowidx_[k];
+        if (row >= 0 && row < static_cast<int>(wanted.size()) && wanted[row])
+            values_out.push_back(all[k]);
+    }
     return 0;
 }
 

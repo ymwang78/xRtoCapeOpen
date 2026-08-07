@@ -282,6 +282,34 @@ Figure 2 也没画这层继承）。之所以仍然加：风险不对称——�
 对外身份一致。测试断言的是**从 ICapeMINLP 引用 `_narrow` 到 ICapeIdentification**——那才是
 PME 实际走的路径，也是 `_is_a` 真正被考的地方。
 
+### 6.4 当前能力画像：**NLP-only profile**（对第三方须明示）
+
+我们实现的是 `ICapeMINLP` 的全部 32 个操作，但**能力上不是完整的 MINLP**。对接第三方 PME
+前必须讲清楚，免得对方以为拿到的是完整实现：
+
+| 能力 | 状态 | 说明 |
+|------|------|------|
+| 连续变量、非线性约束、目标与一阶导数 | ✅ 完整 | 这是 `xOptProblem` 的能力范围 |
+| 变量类型 / 约束线性性 | ⚠️ 推导 | `GetMINLPSize` 上报 `niv=0`/`nlc=0`，故一律回 false。**这不是编造**——是从我们自己上报的规模推出来的。若哪天 `niv>0` 而又说不出是哪几个，则抛 `NO_IMPLEMENT` |
+| Boolean/Integer/String 属性族 | ❌ `NO_IMPLEMENT` | `ICapeMINLPModel` 无此概念 |
+| Hessian | ❌ `ECapeHessianInfoNotAvailable` | 规范为此专设的异常 |
+| Lagrange 乘子 | ❌ `NO_IMPLEMENT` | |
+
+一律不返回空值冒充真答案：求解器分不出「空梯度」和「我没实现」。
+
+### 6.5 已知缺口：**COM 绑定仍是 0-based**
+
+缺口 2 这一轮只修了 CORBA 侧。规范的「variables and constraints are numbered starting
+from 1」写在接口规范里，**与绑定无关**，所以 COM 侧同样适用；而 `CoMINLP`（生产端）与
+`CapeMINLPModelCom`（消费端）目前仍是 0-based 直通。
+
+于是两个绑定的线上语义现在是**分裂**的：CORBA 合规、COM 不合规。COM 侧的回环测试同样
+测不出来（两端都是我们自己，一起偏）。修法与 CORBA 侧同构：在 `CoMINLP` /
+`CapeMINLPModelCom` 这两个边界换基，并补一条非回环测试。
+
+未在本轮一并修，是因为它需要自己的测试改造，且会把这个已经很大的 PR 再撑一圈。
+**在修掉之前，不要对外宣称 COM 绑定符合 CAPE-OPEN 索引约定。**
+
 **步骤 4 证明链**：`tao_catior` 看 Type Id → 第三方 ORB（omniORB/JacORB）**用官方 IDL 自己
 生成 stub** 写客户端、`_narrow` 成功并驱动 → Wireshark GIOP 解析看 `operation` 字段。
 最后一条最强：整条链路里没有我们的任何东西。
