@@ -4,7 +4,8 @@
 >
 > v2 变更：采用 **C-ABI vtable** 方案（`xOptModel_createModel` + `xOptProblemFromBlackBoxModel`），
 > 取代 v1 的「xOpt 内置 COM/CORBA 适配器」方案。CAPE-OPEN 复杂度全部下沉到 DLL 内部，xOpt 零改动复用
-> 既有黑箱通路。索引基统一为 **0-based**。
+> 既有黑箱通路。**内部**（`ICapeMINLPModel` 及其以内、面向 xOpt 的一侧）索引基统一为 0-based；
+> 线上是 1-based，见 §5.1 第 1 条。
 >
 > v3 变更：**同时支持 COM 与 CORBA 两套绑定**，用传输无关抽象 `ICapeMINLPModel` + 后端工厂统一
 > （§3.1–3.4）；映射核心 `CapeMINLPProblemCore` 后端共享只写一遍。打包为「共享核心 + 每后端可选 DLL」。
@@ -141,7 +142,8 @@ public:
   virtual ~ICapeMINLPModel() = default;
   virtual int connect() = 0;                 // COM: CoCreateInstance; CORBA: ORB resolve
   virtual void disconnect() = 0;
-  // —— 以下与 IDL ICapeMINLP 一一对应（0-based）——
+  // —— 以下与 IDL ICapeMINLP 方法一一对应，但索引基不同：本抽象一律 0-based，
+  //    线上 1-based，换基在各后端的线上边界完成（§5.1 第 1 条）——
   virtual int getSize(CapeMINLPSize& s) = 0; // nv,niv,...,nnzof
   virtual int getStructure(const std::string& type,
                            std::vector<int>& rowidx, std::vector<int>& colidx,
@@ -263,7 +265,7 @@ M2 的 mock 不涉及此问题（硬编码）；M3 真接 COM/CORBA 时再定。
 
 `xOptProblemT` 的每个函数指针（DLL 内填充），对应 `ICapeMINLP` 的一次调用。这是适配的规格说明。
 
-| `xOptProblemT` 函数指针 | `ICapeMINLP` 来源 | 说明（0-based 索引） |
+| `xOptProblemT` 函数指针 | `ICapeMINLP` 来源 | 说明（表内索引均指**内部** 0-based；线上为 1-based） |
 |-------------------------|-------------------|----------------------|
 | （`xOptModelT::buildProblem`） | `ICapeMINLPSystem::SetProblemID` + 取 `ICapeMINLP` + `GetMINLPSize` | 绑定模型、读规模、预取并缓存稀疏结构 |
 | `numVariables` | `GetMINLPSize → nv` | |
@@ -276,7 +278,7 @@ M2 的 mock 不涉及此问题（硬编码）；M3 真接 COM/CORBA 时再定。
 | `getInitialX` | `GetMINLPVariableValues(vids)` | 当前值作初值 |
 | `getOptions` | `GetMINLPSize` 派生 | `MAGIC='X'`；`HAS_DERIVATIVE=1`；`HAS_LINEAR_A` 视 `nlc/nlz`；`IS_SIMULATION=0` |
 | `getObjectiveGradientStructure` | `GetMINLPStructure("ObjectiveGradient", …, objindex)` + `nnzof/nlzof` | 传 null 查长度，再填值 |
-| `getConstraintJacobianStructure` | `GetMINLPStructure("Jacobian", rowindex, columnindex, …)` + `nnz/nlz` | 同上两段式；**0-based** 行列索引 |
+| `getConstraintJacobianStructure` | `GetMINLPStructure("Jacobian", rowindex, columnindex, …)` + `nnz/nlz` | 同上两段式；行列索引对 xOpt 是 **0-based**（线上收到的 1-based 已在后端换基） |
 | `getLinearConstraints` | `GetMINLPStructure` 线性部分（`nlc,nlz`）+ `GetMINLPConstraintDerivativeValues("Linear", …)` | 不区分线性/非线性时置 `lcons_size=0` |
 | `setX` | `SetMINLPVariableValues(vids, x)` | 缓存 x；evaluate 前必须先调 |
 | `runTimeCheck` | 恒 1（或校验 bounds） | |
@@ -289,7 +291,15 @@ M2 的 mock 不涉及此问题（硬编码）；M3 真接 COM/CORBA 时再定。
 > 拉格朗日乘子（`Get/SetMINLPLagrangeMultipliers`）黑箱用法通常不需要；若 xRto 需对偶热启动，可扩展。
 
 ### 5.1 落地前需与 DLL 提供方对齐的语义
-1. **索引基 = 0**（已确认）。若某些 CAPE-OPEN 组件返回 1-based，在 DLL 后端内部转换，对 xOpt 始终 0-based。
+1. **索引基**：CAPE-OPEN 线上是 **1-based**，内部对 xOpt 始终 **0-based**，转换发生在 DLL 的
+   两条线上边界（生产端 servant / 消费端 backend），每个方向各一个转换点。
+
+   > 此处原文曾写作「索引基 = 0（已确认）。若某些 CAPE-OPEN 组件返回 1-based，在 DLL 后端内部
+   > 转换」——**前半是错的**。规范并非「某些组件可能 1-based」，而是全篇 20 处明确要求变量与约束
+   > 从 1 编号（`vids`/`cids` 合法范围 `1..nv` / `1..nc`），且这句写在接口规范里、与 COM/CORBA
+   > 绑定无关。这条错误假设就是 xOptMINLPco 设计文档 §6.2 缺口 2 的源头，两个绑定分别在
+   > §6.3 步骤 2（CORBA）和 §6.5 / issue #2（COM）才修掉。
+   > 后半「在 DLL 内部转换、对 xOpt 始终 0-based」倒是对的，也正是最终采用的边界设计。
 2. **结构类型字符串**：`GetMINLPStructure`/`GetMINLP*DerivativeValues` 的 `structuretype`/`stype` 取值
    （`"Jacobian"`/`"ObjectiveGradient"`/`"Linear"`/`"Nonlinear"` 等）抽成常量表，以组件文档为准。
 3. **变量/约束属性名**：`GetMINLPVariableDoubleAttribute(attrib)` 的合法取值（`"Value"`/`"LowerBound"`…）。
@@ -431,7 +441,7 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
       连接目标按 `XRTO_CAPEOPEN_TARGET` 环境变量 > name-with-scheme > `mock:default` 解析（§4.3）。
 - [x] gtest（`tests/test_capeopen_model.cpp`）模拟 `xOptModelBlackBox` 全过程：`xOptModel_createModel`→走
       `getParameters/setParameters/validateModel/ports`→`buildProblem`→驱动 `xOptProblemT`。**15/15 通过**。
-- [ ] 待办：在真实 xRto/xOpt 进程内以 `type_name="BlackBox"`、`model_path=<本 DLL>` 加载并跑通 mock 收敛
+- [ ] 待办（→ issue #4）：在真实 xRto/xOpt 进程内以 `type_name="BlackBox"`、`model_path=<本 DLL>` 加载并跑通 mock 收敛
       （需链接完整 xOpt/zce，超出 core 单测范围）。
 
 **M3 — COM 后端（`backend/com/`）**  ✅ 单元级已落地（2026-06）
@@ -443,7 +453,8 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
       COM 后端注入它做 in-proc 全链路对拍；并经 `CapeMINLPProblemCore` 驱动 `xOptProblemT`。
       gtest `tests/test_capeopen_com.cpp` **2/2 通过**（总 17/17）。CMake `WITH_CAPEOPEN_COM`(WIN32 默认 ON)
       + 链接 `ole32/oleaut32/uuid`。
-- [ ] 待办：production `CoCreateInstance` 路径接真实/参考**已注册** x64 组件做端到端冒烟（CI 无注册组件，
+- [ ] 待办（→ issue #4）：
+      production `CoCreateInstance` 路径接真实/参考**已注册** x64 组件做端到端冒烟（CI 无注册组件，
       仅注入路径覆盖）；CO Tester（32 位）作合规旁路；校准结构类型字符串/属性名（需真实组件）。
 
 **M4 — CORBA/TAO 后端（`backend/corba/`）**  ✅ 单元级已落地（2026-06）
@@ -458,8 +469,10 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
 - 构建：`option(WITH_CAPEOPEN_CORBA=ON)` + `-DTAO_TRIPLET_DIR=<vcpkg .../x64-windows-static-md>`；
   defines `WIN32 ACE_AS_STATIC_LIBS TAO_AS_STATIC_LIBS`；libs `TAO_PortableServers TAO_AnyTypeCodes
   TAOs ACEs ws2_32 mswsock advapi32 user32 iphlpapi`。
-- [ ] 待办：production `string_to_object(IOR/corbaname)` 接真实跨进程 ORB 冒烟；跨后端一致性测试
-  （同一问题经 COM 与 CORBA 输出相等）；`option(CAPEOPEN_SINGLE_DLL)` 合编。
+- [x] production `string_to_object(IOR)` 跨进程冒烟已落地（`tests/test_xoptminlpco_corba_ipc.cpp`）。
+- [ ] 待办：`corbaname:` → issue #6；第三方 ORB 实证 → issue #4；跨后端一致性测试
+  （同一问题经 COM 与 CORBA 输出相等）——issue #2 已修，两个绑定的线上索引基现已一致，
+  这条因此变得有意义了；`option(CAPEOPEN_SINGLE_DLL)` 合编。
 
 **M5 — 收尾**
 - 文档补充整数松弛限制、线程套间约束、`size` 升级规范；把旧 `SqpcSovlerImpl.cpp` 求解器 servant
