@@ -254,17 +254,39 @@ TEST_F(ComOneBasedTest, ObjectiveGradientStructureIsOneBased) {
     SysFreeString(t);
 }
 
-// 「全部」的另一种写法：VT_EMPTY（VB/脚本宿主省略参数时就是这个）。
-// 消费端 softReadIndices 早就把「不是数组」当空处理，生产端也须一致。
-TEST_F(ComOneBasedTest, NonArrayVariantAlsoMeansAll) {
-    VARIANT empty;
-    VariantInit(&empty);  // VT_EMPTY
+// 「全部」的另一种写法：表示「参数没给」的 VARIANT。
+// VB/脚本宿主省略参数给 VT_EMPTY，IDispatch 上则是带 DISP_E_PARAMNOTFOUND 的
+// VT_ERROR。消费端 softReadIndices 早就把非数组当空处理，生产端须一致。
+TEST_F(ComOneBasedTest, OmittedArgumentMeansAll) {
+    for (int which = 0; which < 2; ++which) {
+        VARIANT omitted;
+        VariantInit(&omitted);  // VT_EMPTY
+        if (which == 1) {
+            omitted.vt = VT_ERROR;
+            omitted.scode = DISP_E_PARAMNOTFOUND;
+        }
+        VARIANT names;
+        VariantInit(&names);
+        ASSERT_EQ(co_->GetMINLPVariableNames(omitted, &names), S_OK)
+            << "省略参数（形式 " << which << "）应被当作「全部」，而不是非法入参";
+        EXPECT_EQ(nthBstr(names, 0), "x0");
+        EXPECT_EQ(nthBstr(names, 1), "x1");
+        VariantClear(&names);
+    }
+}
+
+// 「未指定」只认那几种，不是笼统的「凡非数组即全部」。
+// 有人写 vids = 1 想取第一个变量时，必须报错——若当成「全部」，调用方要一个变量
+// 却拿到全部且毫无征兆，正是本项目一直在清的那类静默错误。
+TEST_F(ComOneBasedTest, ScalarIsNotMistakenForAll) {
+    VARIANT scalar;
+    VariantInit(&scalar);
+    scalar.vt = VT_I4;
+    scalar.lVal = 1;
     VARIANT names;
     VariantInit(&names);
-    ASSERT_EQ(co_->GetMINLPVariableNames(empty, &names), S_OK)
-        << "VT_EMPTY 应被当作「全部」，而不是非法入参";
-    EXPECT_EQ(nthBstr(names, 0), "x0");
-    EXPECT_EQ(nthBstr(names, 1), "x1");
+    EXPECT_EQ(co_->GetMINLPVariableNames(scalar, &names), E_INVALIDARG)
+        << "标量被当成了「全部」——调用方要一个变量会静默拿到全部";
     VariantClear(&names);
 }
 

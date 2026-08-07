@@ -81,17 +81,29 @@ namespace {
 // 越界不能静默放过——`XOptMINLPAdapter::pick()` 对越界 id 返回 `T{}`，
 // 于是「求解器发了个非法 id」会变成「悄悄返回 0」，而且毫无征兆。
 //
-// 「全部」有两种写法都接受：空 SAFEARRAY，以及 VT_EMPTY/VT_NULL 这类根本不是
-// 数组的 VARIANT。后者是刻意放宽的——消费端 CapeMINLPModelCom 的 softReadIndices
-// 早就把「不是数组」当空处理，生产端若严格拒绝，同一份约定在两个方向上就不一致了；
-// 而且 VB/脚本宿主传省略参数时给的正是 VT_EMPTY。**宽进严出**：入参形式放宽，
-// 但取值范围照样严格校验。
+// 「全部」接受两种写法：空 SAFEARRAY，以及**表示「参数没给」的那几种** VARIANT。
+// 后者是刻意放宽的——消费端 CapeMINLPModelCom 的 softReadIndices 早就把非数组当空
+// 处理，生产端若严格拒绝，同一份约定在两个方向上就不一致了；而且 VB/脚本宿主省略
+// 可选参数时给的正是 VT_EMPTY，IDispatch 上则是带 DISP_E_PARAMNOTFOUND 的 VT_ERROR。
+//
+// 注意这里**只认这三种**，而不是笼统的「凡非数组即全部」。差别很要紧：后者会把误传的
+// 标量（比如有人写 `vids = 1` 想取第一个变量）也当成「全部」，于是调用方要一个变量、
+// 拿到了全部，而且不报错——正是本项目一直在清的那类静默错误。标量落到下面按数组解析，
+// 失败即 E_INVALIDARG。
+//
+// **宽进严出**：入参形式在「确实表示未指定」的范围内放宽，取值范围照样严格校验。
 //
 // COM 没有用户异常，报错手段是 HRESULT：越界用 E_INVALIDARG，
 // 对应 CORBA 侧抛的 ECapeInvalidArgument。
+bool isOmittedArg(const VARIANT& v) {
+    if (v.vt == VT_EMPTY || v.vt == VT_NULL) return true;
+    // IDispatch 省略可选参数的标准表示
+    return v.vt == VT_ERROR && v.scode == DISP_E_PARAMNOTFOUND;
+}
+
 bool readIdsChecked(const VARIANT& wire, int count, std::vector<int>& out) {
-    if ((wire.vt & VT_ARRAY) == 0) {
-        out.clear();  // 不是数组 = 未指定 = 全部
+    if (isOmittedArg(wire)) {
+        out.clear();  // 未指定 = 全部
         return true;
     }
     if (!cape_com::readIndicesFromWire(wire, out)) return false;

@@ -39,7 +39,10 @@ void softReadIndices(const VARIANT& v, std::vector<int>& out) {
 }
 void softReadDouble(const VARIANT& v, std::vector<double>& out) {
     if ((v.vt & VT_ARRAY) == 0) { out.clear(); return; }
-    readDoubleArray(v, out);
+    // 与 softReadIndices 同理：readDoubleArray 也是先 assign(n, 0.0) 再逐个填，
+    // 中途失败会留下「尺寸对、内容残」的数组。解析失败必须清空——
+    // 一组半截的界或求值结果比空数组危险得多，因为它看起来完全正常。
+    if (!readDoubleArray(v, out)) out.clear();
 }
 }  // namespace
 
