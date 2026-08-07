@@ -31,7 +31,7 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
 
 **关键复用**：`XOptMINLPAdapter` 实现 capeopen_core 已有的 `ICapeMINLPModel` 抽象，于是
 - COM/CORBA 前端只把收到的 `ICapeMINLP` 调用转成 `ICapeMINLPModel` 调用；
-- 直接复用 `CapeOpenComInterfaces.h`（官方 IID + vtable）、`CapeVariantMarshal`、`SqpSolver` IDL + `CapeCorbaMarshal`；
+- 直接复用 `CapeOpenComInterfaces.h`（官方 IID + vtable）、`CapeVariantMarshal`、`CAPEOPEN100_Minlp.idl` stub + `CapeCorbaMarshal`；
 - **回环测试免费**：`xOptProblem(mock) → xOptMINLPco 的 ICapeMINLP → capeopen_core 的 CapeMINLPModelCom/Corba(注入) → 读回 ICapeMINLPModel`，断言与原始一致——一次验证两个方向。
 
 ## 3. 接口映射（capeopen_core §5 的逆）
@@ -69,7 +69,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     产物 **`xOptMINLPco.dll`**（导出 4 个 COM 入口已核对）。
   - [x] **回环测试**（`tests/test_xoptminlpco_com.cpp`）：mock → adapter → `CoMINLP`(打包 VARIANT)
     → capeopen_core `CapeMINLPModelCom`(注入, 解包) → 对拍。**1/1 通过**（adapter 4/4，共 5/5）。
-  - [ ] 待办：`ICapeIdentification`（名称/描述）+ MINLP CATID 注册（移交 N3）。
+  - [x] `ICapeIdentification` 已于 N3 落地（COM）、§6.3 步骤 3 落地（CORBA）。
+  - [ ] MINLP CATID 注册 → issue #5。
   - 构建注记：DLL 导入库改名 `xOptMINLPco_import.lib` 避免与静态库 `xoptminlpco.lib` 大小写冲突
     （LNK1149）；`<olectl.h>` 提供 `SELFREG_E_CLASS`；本机构建用 `-DVCPKG_APPLOCAL_DEPS=OFF`（applocal 缺 dumpbin）。
 - **N3 — COM 注册 + 激活冒烟**  ✅ 已落地（2026-06）
@@ -83,11 +84,11 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `CoMINLP()`（经 `XRTO_XOPT_PROBLEM_DLL` 加载 mock DLL）→ 驱动 `ICapeMINLP`(obj=25) +
     `ICapeIdentification` → 注销。**1/1 通过**（注册失败则 GTEST_SKIP）。验证注入未覆盖的整条
     激活/类厂/生产 ctor/跨 DLL 加载路径。
-  - [ ] 待办：真正独立进程的客户端 exe；MINLP CATID 注册（PME 发现）。
+  - [ ] 待办：真正独立进程的 COM 客户端 exe → issue #4；MINLP CATID 注册（PME 发现）→ issue #5。
 - **N4 — CORBA 前端**  ✅ 已落地（2026-06）
   - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `ICapeMINLP` 委托 `ICapeMINLPModel`
-    （当时基于自造的 `SqpSolver` 模块，§6 步骤 2 已迁到官方模块路径）
-    （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试）。复用 `SqpSolver*` stub + `CapeCorbaMarshal`。
+    （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试），复用 `CapeCorbaMarshal`。
+    当时基于自造的 `SqpSolver` 模块，**§6 步骤 2 已迁到官方模块路径的 stub**。
   - [x] **回环测试**（`tests/test_xoptminlpco_corba.cpp`）：mock → adapter → `MINLPServant`(collocated
     POA) → capeopen_core `CapeMINLPModelCorba`(注入) → 对拍。**1/1 通过**（vcpkg `ace[tao]` static-md）。
   - 构建：`-DWITH_XOPTMINLPCO_CORBA=ON -DTAO_TRIPLET_DIR=<…/x64-windows-static-md>`；CMake 经
@@ -112,8 +113,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `windows.h` 默认拉 `winsock.h`(v1)，顺序反了会炸出 `IPPROTO_IPV6`/`timeval` 一片重定义。
   - server 的控制台输出一律 ASCII：源码是 UTF-8 而 Windows 控制台默认 GBK，中文会乱码——
     这个 exe 正是拿去给第三方演示的。
-  - [ ] 待办：Naming Service 绑定（`corbaname:`）——需另跑 naming 进程才有意义、也才测得了，
-    故与本次分开。IOR 这条路不依赖任何外部服务。
+  - [ ] 待办：Naming Service 绑定（`corbaname:`）→ issue #6。需另跑 naming 进程才有意义、
+    也才测得了，故与本次分开。IOR 这条路不依赖任何外部服务。
 - **N5 — C-ABI 输入 + 打包**  ✅ 已落地（2026-06）
   - [x] `XOptMINLPAdapter` 重构为内部 `IXOptProblemView` 抽象 + 两实现：`CppProblemView`(xOptProblem*)
     / `CapiProblemView`(xOptProblemT vtable，int&↔int* 转换)。`connect()` 自动探测 DLL 导出
@@ -125,7 +126,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `NotUsing` PCH、`SDLCheck=false`、`/DEF:xOptMINLPco.def`、链接 ole32/oleaut32/uuid）。源含本项目
     3 文件 + capeopen_core 的 `CapeMINLPModelCom.cpp`/`CapeVariantMarshal.cpp`（官方 IID + VARIANT marshaling）。
     msbuild Release|x64 验证导出 4 个 COM 入口。CORBA 前端因需环境相关的 TAO 路径，仍由 CMake 构建。
-  - [ ] 待办：独立进程 CORBA server（IOR）；MINLP CATID 注册；正式 install 规则。
+  - [x] 独立进程 CORBA server（IOR）已落地，见上方 N4（2026-08）。
+  - [ ] 待办：MINLP CATID 注册 → issue #5；正式 install 规则（尚未开 issue）。
 
 ## 5. 风险
 
@@ -173,7 +175,10 @@ module CAPEOPEN100 {
 同文并明确：「The OMG directive `#pragma version` … **It isn't used here**」，全文再无 `#pragma prefix`。
 于是 RID 就是模块路径直推、版本恒为 `1.0`：
 
-| | 我们现在 | 官方 |
+> 下表是**本节写作时（迁移前）的对照**，保留以说明缺口从何而来。§6.3 步骤 2 之后
+> 「我们」这一列已经与「官方」一致——现状见 §6.3。
+
+| | 我们当时 | 官方 |
 |---|---|---|
 | RID | `IDL:SqpSolver/ICapeMINLP:1.0` | `IDL:CAPEOPEN100/Business/Numeric/Minlp/ICapeMINLP:1.0` |
 | 标识接口 | 无 | `IDL:CAPEOPEN100/Common/Identification/ICapeIdentification:1.0` |
@@ -181,8 +186,9 @@ module CAPEOPEN100 {
 与 `Optimisation_Interface_Specification.pdf` §4.2（p.57）、`Identification Common Interface.pdf` §4.2
 互相印证。**之前「可能有 pragma prefix」的疑点到此撤销。**
 
-我们这边的实测值可复现：`tao_catior -f <ior>` → `The Type Id: "IDL:SqpSolver/ICapeMINLP:1.0"`，
-或直接看生成的 stub `SqpSolverS.cpp:2032`。
+当时的实测值：`tao_catior -f <ior>` → `The Type Id: "IDL:SqpSolver/ICapeMINLP:1.0"`。
+迁移后同一条命令给出的是官方 RID（见 §4 N4 的证物行），且由
+`tests/test_capeopen100_rid.cpp` 钉住。
 
 ### 6.2 三个合规缺口
 

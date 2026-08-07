@@ -1,4 +1,4 @@
-# xRtoCapeOpen 设计文档：把 CAPE-OPEN MINLP DLL 包装为 xOptProblem
+﻿# xRtoCapeOpen 设计文档：把 CAPE-OPEN MINLP DLL 包装为 xOptProblem
 
 > 版本 v3 · 2026-06-15 · 适用模块：`libsrc/xRtoCapeOpen`、`libsrc/xOpt`
 >
@@ -431,7 +431,7 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
       连接目标按 `XRTO_CAPEOPEN_TARGET` 环境变量 > name-with-scheme > `mock:default` 解析（§4.3）。
 - [x] gtest（`tests/test_capeopen_model.cpp`）模拟 `xOptModelBlackBox` 全过程：`xOptModel_createModel`→走
       `getParameters/setParameters/validateModel/ports`→`buildProblem`→驱动 `xOptProblemT`。**15/15 通过**。
-- [ ] 待办：在真实 xRto/xOpt 进程内以 `type_name="BlackBox"`、`model_path=<本 DLL>` 加载并跑通 mock 收敛
+- [ ] 待办（→ issue #4）：在真实 xRto/xOpt 进程内以 `type_name="BlackBox"`、`model_path=<本 DLL>` 加载并跑通 mock 收敛
       （需链接完整 xOpt/zce，超出 core 单测范围）。
 
 **M3 — COM 后端（`backend/com/`）**  ✅ 单元级已落地（2026-06）
@@ -443,7 +443,8 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
       COM 后端注入它做 in-proc 全链路对拍；并经 `CapeMINLPProblemCore` 驱动 `xOptProblemT`。
       gtest `tests/test_capeopen_com.cpp` **2/2 通过**（总 17/17）。CMake `WITH_CAPEOPEN_COM`(WIN32 默认 ON)
       + 链接 `ole32/oleaut32/uuid`。
-- [ ] 待办：production `CoCreateInstance` 路径接真实/参考**已注册** x64 组件做端到端冒烟（CI 无注册组件，
+- [ ] 待办（→ issue #4；注意 COM 侧还压着 issue #2 的 0-based 缺陷，先修那个再测）：
+      production `CoCreateInstance` 路径接真实/参考**已注册** x64 组件做端到端冒烟（CI 无注册组件，
       仅注入路径覆盖）；CO Tester（32 位）作合规旁路；校准结构类型字符串/属性名（需真实组件）。
 
 **M4 — CORBA/TAO 后端（`backend/corba/`）**  ✅ 单元级已落地（2026-06）
@@ -458,8 +459,10 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
 - 构建：`option(WITH_CAPEOPEN_CORBA=ON)` + `-DTAO_TRIPLET_DIR=<vcpkg .../x64-windows-static-md>`；
   defines `WIN32 ACE_AS_STATIC_LIBS TAO_AS_STATIC_LIBS`；libs `TAO_PortableServers TAO_AnyTypeCodes
   TAOs ACEs ws2_32 mswsock advapi32 user32 iphlpapi`。
-- [ ] 待办：production `string_to_object(IOR/corbaname)` 接真实跨进程 ORB 冒烟；跨后端一致性测试
-  （同一问题经 COM 与 CORBA 输出相等）；`option(CAPEOPEN_SINGLE_DLL)` 合编。
+- [x] production `string_to_object(IOR)` 跨进程冒烟已落地（`tests/test_xoptminlpco_corba_ipc.cpp`）。
+- [ ] 待办：`corbaname:` → issue #6；第三方 ORB 实证 → issue #4；跨后端一致性测试
+  （同一问题经 COM 与 CORBA 输出相等）——**在 issue #2 修掉前必然不等**，因为两个绑定索引基不同；
+  `option(CAPEOPEN_SINGLE_DLL)` 合编。
 
 **M5 — 收尾**
 - 文档补充整数松弛限制、线程套间约束、`size` 升级规范；把旧 `SqpcSovlerImpl.cpp` 求解器 servant
