@@ -73,6 +73,27 @@ HRESULT STDMETHODCALLTYPE CoMINLP::Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS
     return E_NOTIMPL;
 }
 
+namespace {
+
+// 入网的 vids/cids：1-based -> 0-based，并就地校验范围。
+//
+// 规范要求 vids/cids 落在 1..nv / 1..nc（见 CapeVariantMarshal.h 顶部）。
+// 越界不能静默放过——`XOptMINLPAdapter::pick()` 对越界 id 返回 `T{}`，
+// 于是「求解器发了个非法 id」会变成「悄悄返回 0」，而且毫无征兆。
+// 空数组按规范表示「全部」，原样传空下去。
+//
+// COM 没有用户异常，报错手段是 HRESULT：越界用 E_INVALIDARG，
+// 对应 CORBA 侧抛的 ECapeInvalidArgument。
+bool readIdsChecked(const VARIANT& wire, int count, std::vector<int>& out) {
+    if (!cape_com::readIndicesFromWire(wire, out)) return false;
+    for (int id : out) {
+        if (id < 0 || id >= count) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
 // —— ICapeMINLP（委托 model_，vector<->VARIANT marshaling）——
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPSize(long* nv, long* niv, long* nlv, long* nliv, long* nc,
                                                long* nlc, long* nlz, long* nnz, long* nlzof,
@@ -98,16 +119,19 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPStructure(BSTR structuretype, VARIANT
     if (!model_) return E_FAIL;
     std::vector<int> r, c, o;
     if (model_->getStructure(bstrToUtf8(structuretype), r, c, o) < 0) return E_FAIL;
-    if (rowindex) *rowindex = makeLongArray(r);
-    if (columnindex) *columnindex = makeLongArray(c);
-    if (objindex) *objindex = makeLongArray(o);
+    // 内部 0-based -> 线上 1-based。
+    if (rowindex) *rowindex = makeIndicesToWire(r);
+    if (columnindex) *columnindex = makeIndicesToWire(c);
+    if (objindex) *objindex = makeIndicesToWire(o);
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPVariableNames(VARIANT vids, VARIANT* vnames) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(vids, size.num_variables, ids)) return E_INVALIDARG;
     std::vector<std::string> names;
     if (model_->getVariableNames(ids, names) < 0) return E_FAIL;
     if (vnames) *vnames = makeStringArray(names);
@@ -117,7 +141,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPVariableNames(VARIANT vids, VARIANT* 
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPVariableBounds(VARIANT vids, VARIANT* LB, VARIANT* UB) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(vids, size.num_variables, ids)) return E_INVALIDARG;
     std::vector<double> lb, ub;
     if (model_->getVariableBounds(ids, lb, ub) < 0) return E_FAIL;
     if (LB) *LB = makeDoubleArray(lb);
@@ -128,7 +154,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPVariableBounds(VARIANT vids, VARIANT*
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPVariableValues(VARIANT vids, VARIANT* values) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(vids, size.num_variables, ids)) return E_INVALIDARG;
     std::vector<double> v;
     if (model_->getVariableValues(ids, v) < 0) return E_FAIL;
     if (values) *values = makeDoubleArray(v);
@@ -139,7 +167,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::SetMINLPVariableValues(VARIANT vids, VARIANT 
     if (!model_) return E_FAIL;
     std::vector<int> ids;
     std::vector<double> v;
-    readLongArray(vids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(vids, size.num_variables, ids)) return E_INVALIDARG;
     readDoubleArray(values, v);
     return model_->setVariableValues(ids, v) < 0 ? E_FAIL : S_OK;
 }
@@ -147,7 +177,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::SetMINLPVariableValues(VARIANT vids, VARIANT 
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintNames(VARIANT cids, VARIANT* cnames) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(cids, size.num_constraints, ids)) return E_INVALIDARG;
     std::vector<std::string> names;
     if (model_->getConstraintNames(ids, names) < 0) return E_FAIL;
     if (cnames) *cnames = makeStringArray(names);
@@ -157,7 +189,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintNames(VARIANT cids, VARIANT
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintBounds(VARIANT cids, VARIANT* LB, VARIANT* UB) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(cids, size.num_constraints, ids)) return E_INVALIDARG;
     std::vector<double> lb, ub;
     if (model_->getConstraintBounds(ids, lb, ub) < 0) return E_FAIL;
     if (LB) *LB = makeDoubleArray(lb);
@@ -168,7 +202,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintBounds(VARIANT cids, VARIAN
 HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPNonlinearConstraintValues(VARIANT cids, VARIANT* values) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(cids, size.num_constraints, ids)) return E_INVALIDARG;
     std::vector<double> v;
     if (model_->getNonlinearConstraintValues(ids, v) < 0) return E_FAIL;
     if (values) *values = makeDoubleArray(v);
@@ -179,7 +215,9 @@ HRESULT STDMETHODCALLTYPE CoMINLP::GetMINLPConstraintDerivativeValues(BSTR struc
                                                                      VARIANT* vals) {
     if (!model_) return E_FAIL;
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    CapeMINLPSize size;
+    if (model_->getSize(size) < 0) return E_FAIL;
+    if (!readIdsChecked(cids, size.num_constraints, ids)) return E_INVALIDARG;
     std::vector<double> v;
     if (model_->getConstraintDerivativeValues(bstrToUtf8(structtype), ids, v) < 0) return E_FAIL;
     if (vals) *vals = makeDoubleArray(v);

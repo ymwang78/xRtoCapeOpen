@@ -79,8 +79,11 @@ TEST(XOptMINLPcoRegister, ActivateViaCoCreateInstance) {
     EXPECT_EQ(nv, 2);
     EXPECT_EQ(nc, 1);
 
-    // setX(3,4) 后目标应为 25
-    VARIANT vids = makeLongArray({0, 1});
+    // setX(3,4) 后目标应为 25。
+    // vids 用 **1-based**：本用例扮演的是 CAPE-OPEN 客户端，规范要求变量从 1 编号
+    // （issue #2）。这里原先写 {0, 1}，在 COM 侧换基之前一直"能过"——那恰恰是
+    // 缺陷的一部分，不是测试的便利写法。
+    VARIANT vids = makeLongArray({1, 2});
     VARIANT vals = makeDoubleArray({3.0, 4.0});
     EXPECT_EQ(minlp->SetMINLPVariableValues(vids, vals), S_OK);
     VariantClear(&vids);

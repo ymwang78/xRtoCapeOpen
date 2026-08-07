@@ -312,18 +312,29 @@ PME 实际走的路径，也是 `_is_a` 真正被考的地方。
 或确认它对 `NO_IMPLEMENT` 是降级而非中止。这就是把它叫「NLP-only profile」而不是
 「完整 ICapeMINLP」的原因。
 
-### 6.5 已知缺口：**COM 绑定仍是 0-based**
+### 6.5 COM 绑定的索引基 ✅ 已修（2026-08，issue #2）
 
-缺口 2 这一轮只修了 CORBA 侧。规范的「variables and constraints are numbered starting
-from 1」写在接口规范里，**与绑定无关**，所以 COM 侧同样适用；而 `CoMINLP`（生产端）与
-`CapeMINLPModelCom`（消费端）目前仍是 0-based 直通。
+缺口 2 最初只修了 CORBA 侧，留下两个绑定线上语义分裂。规范的「variables and constraints
+are numbered starting from 1」写在接口规范里、**与绑定无关**，所以 COM 侧当时是
+**不合规**，不只是不一致。现已按与 CORBA 完全相同的约定修掉：
 
-于是两个绑定的线上语义现在是**分裂**的：CORBA 合规、COM 不合规。COM 侧的回环测试同样
-测不出来（两端都是我们自己，一起偏）。修法与 CORBA 侧同构：在 `CoMINLP` /
-`CapeMINLPModelCom` 这两个边界换基，并补一条非回环测试。
+- 换基函数放 `CapeVariantMarshal`（`makeIndicesToWire` / `readIndicesFromWire`），
+  与普通 long 数组的 `makeLongArray` / `readLongArray` **分开命名**——`ICapeMINLP` 里既有
+  要换基的量也有不换基的量，共用一个函数时误用无征兆。
+- 生产端 `CoMINLP`：入网 vids/cids 减一并校验范围，越界返回 `E_INVALIDARG`
+  （COM 无用户异常，这是 CORBA 侧 `ECapeInvalidArgument` 的对应物）；出网结构索引加一。
+- 消费端 `CapeMINLPModelCom`：出网 vids/cids 加一，入网结构索引减一。
+  顺带删掉了不换基的 `softReadInt`——它已无人使用，留着只是给后来者一个误用入口。
+- `RefCapeMINLP`（扮演第三方 CO 组件的参考实现）改为严格 1-based，并**刻意不复用**上面那对
+  helper、自己写一份加减一。理由同 CORBA 侧的 `RefCapeMINLPServant`：它存在的意义就是给
+  消费端换基做独立校验，共用 helper 的话 helper 里的错会让两端一致地偏、测试照样全绿。
+- 新增 `tests/test_xoptminlpco_com_onebased.cpp`：**非回环**校验，手工构造 1-based 的
+  VARIANT 入参、手工写死 1-based 期望值，直接驱动 `CoMINLP`。已反向验证——把生产端换基
+  退回去时 4 条断言如实失败。
+- `tests/test_xoptminlpco_register.cpp` 的 `vids` 从 `{0,1}` 改为 `{1,2}`：该用例扮演的是
+  CAPE-OPEN 客户端，本来就该说 1-based。它原先"能过"正是缺陷的一部分。
 
-未在本轮一并修，是因为它需要自己的测试改造，且会把这个已经很大的 PR 再撑一圈。
-**在修掉之前，不要对外宣称 COM 绑定符合 CAPE-OPEN 索引约定。**
+至此 COM 与 CORBA 两个绑定的线上索引语义一致，且都与规范一致。
 
 **步骤 4 证明链**：`tao_catior` 看 Type Id → 第三方 ORB（omniORB/JacORB）**用官方 IDL 自己
 生成 stub** 写客户端、`_narrow` 成功并驱动 → Wireshark GIOP 解析看 `operation` 字段。
@@ -336,7 +347,7 @@ from 1」写在接口规范里，**与绑定无关**，所以 COM 侧同样适�
 | 风险 | 状态 | 影响 |
 |------|------|------|
 | 重建的 `Common::Error` 异常成员未与官方 IDL 核对 | 🔴 **活跃** | 见下 |
-| COM 绑定仍 0-based | 🔴 **不合规** | §6.5 |
+| ~~COM 绑定仍 0-based~~ | ✅ 已修 | §6.5（issue #2） |
 | 能力上是 NLP-only，非完整 MINLP | 🟡 需明示 | §6.4 |
 | 未经第三方 ORB 实测 | 🟡 未验证 | 步骤 4，目前所有验证两端都是我们的代码 |
 
