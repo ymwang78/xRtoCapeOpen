@@ -9,6 +9,17 @@
 //  CapeMINLPModelMock（解析解小 NLP）。作为 CapeMINLPModelCom 的 in-proc
 //  测试对端，验证 VARIANT/SAFEARRAY/BSTR/HRESULT 全链路（design §5.3）。
 //  仅测试编译，仅 Windows。
+//
+//  它扮演的是「一个合规的第三方 CO 组件」，因此：
+//
+//  1. 严格 1-based。规范：变量与约束从 1 开始编号，vids/cids 合法范围
+//     1..nv / 1..nc（issue #2）。
+//
+//  2. **刻意不复用 CapeVariantMarshal 的 makeIndicesToWire/readIndicesFromWire**，
+//     而是自己显式做加减一。理由：本组件存在的意义就是给消费端
+//     CapeMINLPModelCom 的换基做独立校验。若两端共用同一对 helper，helper 里的
+//     错会让两端一致地偏、测试照样全绿——CORBA 侧的 RefCapeMINLPServant 出于
+//     同样的理由也是自己写的一份。这里的重复是有意的。
 // ***************************************************************
 #ifdef _WIN32
 

@@ -27,13 +27,22 @@ extern "C" const GUID IID_ICapeIdentification = {
 
 namespace {
 // 软解包：输出参数若不是数组（空），按空向量处理而非报错。
-void softReadInt(const VARIANT& v, std::vector<int>& out) {
+//
+// 只提供**索引**版本：本类当前从线上读回的整数数组只有结构索引一种，都要换基。
+// 若将来要读非索引的整数数组（如 GetMINLPVariableIntegerAttribute 的 values），
+// 请另加一个不换基的函数，而不是复用这个——见 CapeVariantMarshal.h 顶部。
+void softReadIndices(const VARIANT& v, std::vector<int>& out) {
     if ((v.vt & VT_ARRAY) == 0) { out.clear(); return; }
-    readLongArray(v, out);
+    // 「软」指的是「不是数组就当空」，不是「解析失败也照单全收」：
+    // 解析失败时必须清空，否则半截的索引会被当成真实结构继续往下传。
+    if (!readIndicesFromWire(v, out)) out.clear();
 }
 void softReadDouble(const VARIANT& v, std::vector<double>& out) {
     if ((v.vt & VT_ARRAY) == 0) { out.clear(); return; }
-    readDoubleArray(v, out);
+    // 与 softReadIndices 同理：readDoubleArray 也是先 assign(n, 0.0) 再逐个填，
+    // 中途失败会留下「尺寸对、内容残」的数组。解析失败必须清空——
+    // 一组半截的界或求值结果比空数组危险得多，因为它看起来完全正常。
+    if (!readDoubleArray(v, out)) out.clear();
 }
 }  // namespace
 
@@ -126,16 +135,17 @@ int CapeMINLPModelCom::getStructure(const std::string& type, std::vector<int>& r
     VariantGuard vr, vc, vo;
     HRESULT hr = minlp_->GetMINLPStructure(bt.get(), vr.ptr(), vc.ptr(), vo.ptr());
     if (FAILED(hr)) return failHr("GetMINLPStructure", hr);
-    softReadInt(vr.ref(), row_index);
-    softReadInt(vc.ref(), col_index);
-    softReadInt(vo.ref(), obj_index);
+    // 结构索引线上是 1-based（规范：变量与约束从 1 开始编号），内部一律 0-based。
+    softReadIndices(vr.ref(), row_index);
+    softReadIndices(vc.ref(), col_index);
+    softReadIndices(vo.ref(), obj_index);
     return 0;
 }
 
 int CapeMINLPModelCom::getVariableNames(const std::vector<int>& vids,
                                         std::vector<std::string>& names_out) {
     if (!minlp_) return fail("getVariableNames: not connected");
-    VARIANT ids = makeLongArray(vids);
+    VARIANT ids = makeIndicesToWire(vids);
     VariantGuard vn;
     HRESULT hr = minlp_->GetMINLPVariableNames(ids, vn.ptr());
     VariantClear(&ids);
@@ -147,7 +157,7 @@ int CapeMINLPModelCom::getVariableNames(const std::vector<int>& vids,
 int CapeMINLPModelCom::getVariableBounds(const std::vector<int>& vids, std::vector<double>& lower_out,
                                          std::vector<double>& upper_out) {
     if (!minlp_) return fail("getVariableBounds: not connected");
-    VARIANT ids = makeLongArray(vids);
+    VARIANT ids = makeIndicesToWire(vids);
     VariantGuard lb, ub;
     HRESULT hr = minlp_->GetMINLPVariableBounds(ids, lb.ptr(), ub.ptr());
     VariantClear(&ids);
@@ -160,7 +170,7 @@ int CapeMINLPModelCom::getVariableBounds(const std::vector<int>& vids, std::vect
 int CapeMINLPModelCom::getVariableValues(const std::vector<int>& vids,
                                          std::vector<double>& values_out) {
     if (!minlp_) return fail("getVariableValues: not connected");
-    VARIANT ids = makeLongArray(vids);
+    VARIANT ids = makeIndicesToWire(vids);
     VariantGuard vv;
     HRESULT hr = minlp_->GetMINLPVariableValues(ids, vv.ptr());
     VariantClear(&ids);
@@ -172,7 +182,7 @@ int CapeMINLPModelCom::getVariableValues(const std::vector<int>& vids,
 int CapeMINLPModelCom::setVariableValues(const std::vector<int>& vids,
                                          const std::vector<double>& values) {
     if (!minlp_) return fail("setVariableValues: not connected");
-    VARIANT ids = makeLongArray(vids);
+    VARIANT ids = makeIndicesToWire(vids);
     VARIANT vals = makeDoubleArray(values);
     HRESULT hr = minlp_->SetMINLPVariableValues(ids, vals);
     VariantClear(&ids);
@@ -184,7 +194,7 @@ int CapeMINLPModelCom::setVariableValues(const std::vector<int>& vids,
 int CapeMINLPModelCom::getConstraintNames(const std::vector<int>& cids,
                                           std::vector<std::string>& names_out) {
     if (!minlp_) return fail("getConstraintNames: not connected");
-    VARIANT ids = makeLongArray(cids);
+    VARIANT ids = makeIndicesToWire(cids);
     VariantGuard cn;
     HRESULT hr = minlp_->GetMINLPConstraintNames(ids, cn.ptr());
     VariantClear(&ids);
@@ -196,7 +206,7 @@ int CapeMINLPModelCom::getConstraintNames(const std::vector<int>& cids,
 int CapeMINLPModelCom::getConstraintBounds(const std::vector<int>& cids, std::vector<double>& lower_out,
                                            std::vector<double>& upper_out) {
     if (!minlp_) return fail("getConstraintBounds: not connected");
-    VARIANT ids = makeLongArray(cids);
+    VARIANT ids = makeIndicesToWire(cids);
     VariantGuard lb, ub;
     HRESULT hr = minlp_->GetMINLPConstraintBounds(ids, lb.ptr(), ub.ptr());
     VariantClear(&ids);
@@ -209,7 +219,7 @@ int CapeMINLPModelCom::getConstraintBounds(const std::vector<int>& cids, std::ve
 int CapeMINLPModelCom::getNonlinearConstraintValues(const std::vector<int>& cids,
                                                     std::vector<double>& values_out) {
     if (!minlp_) return fail("getNonlinearConstraintValues: not connected");
-    VARIANT ids = makeLongArray(cids);
+    VARIANT ids = makeIndicesToWire(cids);
     VariantGuard vv;
     HRESULT hr = minlp_->GetMINLPNonlinearConstraintValues(ids, vv.ptr());
     VariantClear(&ids);
@@ -223,7 +233,7 @@ int CapeMINLPModelCom::getConstraintDerivativeValues(const std::string& type,
                                                      std::vector<double>& values_out) {
     if (!minlp_) return fail("getConstraintDerivativeValues: not connected");
     BstrGuard bt(type);
-    VARIANT ids = makeLongArray(cids);
+    VARIANT ids = makeIndicesToWire(cids);
     VariantGuard vv;
     HRESULT hr = minlp_->GetMINLPConstraintDerivativeValues(bt.get(), ids, vv.ptr());
     VariantClear(&ids);

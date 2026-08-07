@@ -203,6 +203,27 @@ bool readStringArray(const VARIANT& var, std::vector<std::string>& out) {
     return true;
 }
 
+// —— 索引数组（换基）。见头文件顶部关于分界线的说明。——
+
+VARIANT makeIndicesToWire(const std::vector<int>& internal_zero_based) {
+    std::vector<int> wire;
+    wire.reserve(internal_zero_based.size());
+    for (int id : internal_zero_based) wire.push_back(id + 1);
+    return makeLongArray(wire);
+}
+
+bool readIndicesFromWire(const VARIANT& var, std::vector<int>& out) {
+    if (!readLongArray(var, out)) {
+        // readLongArray 先 assign(n, 0) 再逐个填，中途失败会留下「已定尺寸、
+        // 部分有值、且**没有减一**」的 out。失败时必须清空——否则调用方即使
+        // 检查了返回值，一个半截的索引数组也已经躺在那里等着被误用。
+        out.clear();
+        return false;
+    }
+    for (int& id : out) id -= 1;
+    return true;
+}
+
 }  // namespace cape_com
 
 #endif  // _WIN32

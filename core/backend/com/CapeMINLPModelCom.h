@@ -8,6 +8,11 @@
 //  COM 后端：把一个实现 CAPE-OPEN ICapeMINLP 的 COM 组件适配为
 //  传输无关的 ICapeMINLPModel（design §3.1、§5.2、§6.4）。仅 Windows。
 //
+//  索引基：本类是「内部 0-based」与「线上 1-based」的分界线之一（另一处是
+//  生产端 CoMINLP）。vids/cids 出网时 +1，结构索引入网时 -1。
+//  规范要求变量与约束从 1 开始编号，且这条写在接口规范里、与绑定无关——
+//  CORBA 侧的 CapeMINLPModelCorba.h 有同样的说明。详见 CapeVariantMarshal.h 顶部。
+//
 //  连接目标（target）支持 ProgID（"Some.ProgId"）或 CLSID 字符串
 //  （"{GUID}"）。connect() 内做 CoInitializeEx + CoCreateInstance + QI。
 //  另提供注入构造（传入已有 ICapeMINLP*），用于 in-proc 单测，绕过注册表。

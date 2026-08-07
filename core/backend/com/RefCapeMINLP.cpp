@@ -35,6 +35,32 @@ ULONG STDMETHODCALLTYPE RefCapeMINLP::Release() {
     return r;
 }
 
+namespace {
+
+// 本文件**不用** CapeVariantMarshal 的 makeIndicesToWire/readIndicesFromWire——
+// 见头文件说明：本组件是消费端换基的独立校验，共用 helper 就失去了校验意义。
+// 下面这两个是本地的、独立写的一份。
+
+std::vector<int> idsFromWire(const VARIANT& v) {
+    std::vector<int> out;
+    cape_com::readLongArray(v, out);
+    for (int& id : out) {
+        id -= 1;  // 规范：vids/cids 从 1 开始编号
+    }
+    return out;
+}
+
+VARIANT idsToWire(const std::vector<int>& internal_zero_based) {
+    std::vector<int> wire;
+    wire.reserve(internal_zero_based.size());
+    for (int id : internal_zero_based) {
+        wire.push_back(id + 1);
+    }
+    return cape_com::makeLongArray(wire);
+}
+
+}  // namespace
+
 // —— IDispatch（桩）——
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetTypeInfoCount(UINT* pctinfo) {
     if (pctinfo) *pctinfo = 0;
@@ -72,15 +98,15 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPStructure(BSTR structuretype, VA
                                                          VARIANT* columnindex, VARIANT* objindex) {
     std::vector<int> r, c, o;
     if (mock_.getStructure(bstrToUtf8(structuretype), r, c, o) < 0) return E_FAIL;
-    if (rowindex) *rowindex = makeLongArray(r);
-    if (columnindex) *columnindex = makeLongArray(c);
-    if (objindex) *objindex = makeLongArray(o);
+    if (rowindex) *rowindex = idsToWire(r);
+    if (columnindex) *columnindex = idsToWire(c);
+    if (objindex) *objindex = idsToWire(o);
     return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableNames(VARIANT vids, VARIANT* vnames) {
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    ids = idsFromWire(vids);
     std::vector<std::string> names;
     if (mock_.getVariableNames(ids, names) < 0) return E_FAIL;
     if (vnames) *vnames = makeStringArray(names);
@@ -89,7 +115,7 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableNames(VARIANT vids, VARI
 
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableBounds(VARIANT vids, VARIANT* LB, VARIANT* UB) {
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    ids = idsFromWire(vids);
     std::vector<double> lb, ub;
     if (mock_.getVariableBounds(ids, lb, ub) < 0) return E_FAIL;
     if (LB) *LB = makeDoubleArray(lb);
@@ -99,7 +125,7 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableBounds(VARIANT vids, VAR
 
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableValues(VARIANT vids, VARIANT* values) {
     std::vector<int> ids;
-    readLongArray(vids, ids);
+    ids = idsFromWire(vids);
     std::vector<double> v;
     if (mock_.getVariableValues(ids, v) < 0) return E_FAIL;
     if (values) *values = makeDoubleArray(v);
@@ -109,14 +135,14 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPVariableValues(VARIANT vids, VAR
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::SetMINLPVariableValues(VARIANT vids, VARIANT values) {
     std::vector<int> ids;
     std::vector<double> v;
-    readLongArray(vids, ids);
+    ids = idsFromWire(vids);
     readDoubleArray(values, v);
     return mock_.setVariableValues(ids, v) < 0 ? E_FAIL : S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPConstraintNames(VARIANT cids, VARIANT* cnames) {
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    ids = idsFromWire(cids);
     std::vector<std::string> names;
     if (mock_.getConstraintNames(ids, names) < 0) return E_FAIL;
     if (cnames) *cnames = makeStringArray(names);
@@ -125,7 +151,7 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPConstraintNames(VARIANT cids, VA
 
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPConstraintBounds(VARIANT cids, VARIANT* LB, VARIANT* UB) {
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    ids = idsFromWire(cids);
     std::vector<double> lb, ub;
     if (mock_.getConstraintBounds(ids, lb, ub) < 0) return E_FAIL;
     if (LB) *LB = makeDoubleArray(lb);
@@ -136,7 +162,7 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPConstraintBounds(VARIANT cids, V
 HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPNonlinearConstraintValues(VARIANT cids,
                                                                          VARIANT* values) {
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    ids = idsFromWire(cids);
     std::vector<double> v;
     if (mock_.getNonlinearConstraintValues(ids, v) < 0) return E_FAIL;
     if (values) *values = makeDoubleArray(v);
@@ -147,7 +173,7 @@ HRESULT STDMETHODCALLTYPE RefCapeMINLP::GetMINLPConstraintDerivativeValues(BSTR 
                                                                           VARIANT cids,
                                                                           VARIANT* vals) {
     std::vector<int> ids;
-    readLongArray(cids, ids);
+    ids = idsFromWire(cids);
     std::vector<double> v;
     if (mock_.getConstraintDerivativeValues(bstrToUtf8(structtype), ids, v) < 0) return E_FAIL;
     if (vals) *vals = makeDoubleArray(v);

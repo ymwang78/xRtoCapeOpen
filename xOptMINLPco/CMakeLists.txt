@@ -107,6 +107,16 @@ if(XOPTMINLPCO_BUILD_TESTS)
         target_link_libraries(test_xoptminlpco_com PRIVATE xoptminlpco_com GTest::gtest)
         add_test(NAME XOptMINLPcoComTest COMMAND test_xoptminlpco_com)
 
+        # COM 侧索引基的非回环校验（issue #2）：手工构造 1-based VARIANT 直接驱动
+        # CoMINLP。上面那条回环用例两端都是我们自己，一起偏也照绿。
+        add_executable(test_xoptminlpco_com_onebased
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_com_onebased.cpp
+        )
+        target_link_libraries(test_xoptminlpco_com_onebased PRIVATE xoptminlpco_com GTest::gtest)
+        target_include_directories(test_xoptminlpco_com_onebased PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+        add_test(NAME XOptMINLPcoComOneBasedTest COMMAND test_xoptminlpco_com_onebased)
+
         # N3：注册 + CoCreateInstance 激活冒烟（用注册的 xOptMINLPco.dll 加载 mock DLL）
         add_executable(test_xoptminlpco_register
             ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_register.cpp
