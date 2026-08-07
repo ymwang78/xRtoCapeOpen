@@ -1,4 +1,4 @@
-# xOptMINLPco 设计文档：把 xOptProblem DLL 发布为 CAPE-OPEN MINLP 组件
+﻿# xOptMINLPco 设计文档：把 xOptProblem DLL 发布为 CAPE-OPEN MINLP 组件
 
 > 版本 v1 · 2026-06-17 · 适用模块：`libsrc/xRtoCapeOpen/xOptMINLPco`
 >
@@ -26,7 +26,7 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
         （numVariables/structure/bounds/setX/evaluate* → ICapeMINLPModel 语义；结构缓存；0-based）
             ▲
    COM 前端: CoMINLP : ICapeMINLP(+ICapeIdentification, IDispatch)  → 委托 adapter   (N2)
-   CORBA 前端: MINLPServant : POA_SqpSolver::ICapeMINLP            → 委托 adapter   (N4)
+   CORBA 前端: MINLPServant : POA_CAPEOPEN100::…::ICapeMINLP       → 委托 adapter   (N4/§6)
 ```
 
 **关键复用**：`XOptMINLPAdapter` 实现 capeopen_core 已有的 `ICapeMINLPModel` 抽象，于是
@@ -48,9 +48,12 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
 | `GetMINLPConstraintDerivativeValues("Jacobian")` | `evaluateConstraintsJacobianValues` |
 | `GetMINLPNonlinearObjectiveFunctionValue` | `evaluateObjective` |
 | `GetMINLPObjectiveFunctionDerivativeValues` | `evaluateObjectiveGradient` |
-| Hessian / Lagrange / 属性 / 变量类型 | 返回空 / `NO_IMPLEMENT`（首版） |
+| Hessian / Lagrange / 属性族 | `ECapeHessianInfoNotAvailable` / `NO_IMPLEMENT`（不返回空值冒充真答案，见 §6.4） |
+| 变量类型 / 约束线性性 | 由已上报的 `niv`/`nlc` 推导（§6.4） |
 
-> `vids`/`cids`：按 0-based 索引子集挑选；空表示「全部」。
+> `vids`/`cids`：**线上是 1-based**（规范要求），内部 `ICapeMINLPModel` 保持 0-based，
+> 换基只发生在 CAPE-OPEN 线上边界——见 §6.2 缺口 2 与 `CapeCorbaMarshal.h` 顶部。
+> 空序列表示「全部」。
 
 ## 4. 里程碑
 
@@ -82,7 +85,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     激活/类厂/生产 ctor/跨 DLL 加载路径。
   - [ ] 待办：真正独立进程的客户端 exe；MINLP CATID 注册（PME 发现）。
 - **N4 — CORBA 前端**  ✅ 已落地（2026-06）
-  - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `SqpSolver::ICapeMINLP` 委托 `ICapeMINLPModel`
+  - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `ICapeMINLP` 委托 `ICapeMINLPModel`
+    （当时基于自造的 `SqpSolver` 模块，§6 步骤 2 已迁到官方模块路径）
     （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试）。复用 `SqpSolver*` stub + `CapeCorbaMarshal`。
   - [x] **回环测试**（`tests/test_xoptminlpco_corba.cpp`）：mock → adapter → `MINLPServant`(collocated
     POA) → capeopen_core `CapeMINLPModelCorba`(注入) → 对拍。**1/1 通过**（vcpkg `ace[tao]` static-md）。
@@ -91,16 +95,19 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - [x] **独立进程 CORBA server**（2026-08）：`xOptMINLPco/MINLPCorbaServer.cpp` →
     `xOptMINLPcoCorbaServer.exe`。`ORB_init`(消费 `-ORB*`) → RootPOA → `MINLPServant`(生产 ctor)
     → `activate_object` → `object_to_string` → IOR 打 stdout + 原子写 `--ior-file`(先 `.tmp` 再
-    改名，避免读者读到半截) → `orb->run()`；SIGINT/SIGTERM → `orb->shutdown()`。
+    改名，避免读者读到半截) → 带超时轮转事件循环；信号处理器只置标志（调 `orb->shutdown()`
+    不是 async-signal-safe），停机由主线程发起。Windows 另装 `SetConsoleCtrlHandler`——
+    这系统没有 SIGTERM，SIGINT 也只经 CRT 控制台投递，实测 taskkill 打不动。
     **为什么必须是 exe**：CORBA 没有 COM 的进程内激活（注册表 + `DllGetClassObject` 把组件
     加载进客户端进程），外部 ORB 只能经 IIOP 连到一个真在跑 ORB 的进程。
   - [x] **跨进程冒烟**（`tests/test_xoptminlpco_corba_ipc.cpp`）：起 server → 轮询 IOR（server
     提前退出则带退出码立即失败，不干等超时）→ `CapeBackendFactory("corba:IOR:…")` →
-    `string_to_object`/`_narrow` → 驱动对拍。**1/1 通过**（xOptMINLPco 共 6 测试）。
+    `string_to_object`/`_narrow` → 驱动对拍。**1/1 通过**（xOptMINLPco 现共 7 测试）。
     同时验掉 capeopen_core M4 挂着的 production 连接串路径——collocated 用例走注入构造，
     从不碰 `string_to_object`/`_narrow`，也就验不到 IIOP。
-  - 已验证的证物：`tao_catior -f <ior>` 解出 `The Type Id: "IDL:SqpSolver/ICapeMINLP:1.0"`，
-    IIOP 1.2、TAO ORB type。**注意这个 Repository ID 不是 CAPE-OPEN 官方的**，见 §6。
+  - 已验证的证物：`tao_catior -f <ior>` 解出
+    `The Type Id: "IDL:CAPEOPEN100/Business/Numeric/Minlp/ICapeMINLP:1.0"`，IIOP 1.2、TAO ORB type。
+    （§6 步骤 2 迁移前这里是自造的 `IDL:SqpSolver/ICapeMINLP:1.0`。）
   - 构建注记：IPC 测试里 ACE/TAO 头必须排在 `<windows.h>` 之前——ACE 拉 `winsock2.h`，
     `windows.h` 默认拉 `winsock.h`(v1)，顺序反了会炸出 `IPPROTO_IPV6`/`timeval` 一片重定义。
   - server 的控制台输出一律 ASCII：源码是 UTF-8 而 Windows 控制台默认 GBK，中文会乱码——
@@ -305,6 +312,23 @@ PME 实际走的路径，也是 `_is_a` 真正被考的地方。
 或确认它对 `NO_IMPLEMENT` 是降级而非中止。这就是把它叫「NLP-only profile」而不是
 「完整 ICapeMINLP」的原因。
 
+### 6.5 已知缺口：**COM 绑定仍是 0-based**
+
+缺口 2 这一轮只修了 CORBA 侧。规范的「variables and constraints are numbered starting
+from 1」写在接口规范里，**与绑定无关**，所以 COM 侧同样适用；而 `CoMINLP`（生产端）与
+`CapeMINLPModelCom`（消费端）目前仍是 0-based 直通。
+
+于是两个绑定的线上语义现在是**分裂**的：CORBA 合规、COM 不合规。COM 侧的回环测试同样
+测不出来（两端都是我们自己，一起偏）。修法与 CORBA 侧同构：在 `CoMINLP` /
+`CapeMINLPModelCom` 这两个边界换基，并补一条非回环测试。
+
+未在本轮一并修，是因为它需要自己的测试改造，且会把这个已经很大的 PR 再撑一圈。
+**在修掉之前，不要对外宣称 COM 绑定符合 CAPE-OPEN 索引约定。**
+
+**步骤 4 证明链**：`tao_catior` 看 Type Id → 第三方 ORB（omniORB/JacORB）**用官方 IDL 自己
+生成 stub** 写客户端、`_narrow` 成功并驱动 → Wireshark GIOP 解析看 `operation` 字段。
+最后一条最强：整条链路里没有我们的任何东西。
+
 ### 6.6 残留风险：**「CORBA 侧修好了」≠「组件已合规」**
 
 §6.2 的三个缺口都关了，但下面这些仍未解决。对第三方宣称合规前请逐条过一遍。
@@ -329,23 +353,6 @@ PME 实际走的路径，也是 `_is_a` 真正被考的地方。
 修复只能等官方 `CAPE-OPENv1-0-0.idl`：在没有它的情况下继续猜成员只会增加分歧面，不会降低风险。
 在那之前，**错误路径上的 marshalling 失败应先按这一条排查**。同样的说明也写在
 `CAPEOPEN100_Minlp.idl` 文件头「已知偏差 1」里——那才是第三方会读到的地方。
-
-### 6.5 已知缺口：**COM 绑定仍是 0-based**
-
-缺口 2 这一轮只修了 CORBA 侧。规范的「variables and constraints are numbered starting
-from 1」写在接口规范里，**与绑定无关**，所以 COM 侧同样适用；而 `CoMINLP`（生产端）与
-`CapeMINLPModelCom`（消费端）目前仍是 0-based 直通。
-
-于是两个绑定的线上语义现在是**分裂**的：CORBA 合规、COM 不合规。COM 侧的回环测试同样
-测不出来（两端都是我们自己，一起偏）。修法与 CORBA 侧同构：在 `CoMINLP` /
-`CapeMINLPModelCom` 这两个边界换基，并补一条非回环测试。
-
-未在本轮一并修，是因为它需要自己的测试改造，且会把这个已经很大的 PR 再撑一圈。
-**在修掉之前，不要对外宣称 COM 绑定符合 CAPE-OPEN 索引约定。**
-
-**步骤 4 证明链**：`tao_catior` 看 Type Id → 第三方 ORB（omniORB/JacORB）**用官方 IDL 自己
-生成 stub** 写客户端、`_narrow` 成功并驱动 → Wireshark GIOP 解析看 `operation` 字段。
-最后一条最强：整条链路里没有我们的任何东西。
 
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。
