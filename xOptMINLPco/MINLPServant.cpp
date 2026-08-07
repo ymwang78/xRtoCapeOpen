@@ -23,16 +23,38 @@ namespace ct = ::CAPEOPEN100::Common::Types;
 // 规范说 vids 必须落在 1..nv；越界不能静默放过——v1 的 pick() 对越界 id
 // 返回 T{}，于是「求解器发了个非法 id」会变成「悄悄返回 0」。
 // 空序列按规范表示「全部」，原样传空下去。
+//
+// 越界抛 IDL 里声明的 ECapeInvalidArgument，而不是 CORBA::BAD_PARAM 系统异常：
+// 每个受影响的操作在 CAPEOPEN100_Minlp.idl 里都声明了
+// raises(...::ECapeInvalidArgument, ...)，第三方 CO 客户端 catch 的就是它；
+// 收到一个未声明的系统异常正好破坏本项目要的互操作性。
+//
+// interfaceName / operation 按规范（Error Common Interface §3.3）是必填字段。
+[[noreturn]] void throwInvalidId(int wire_id, int count, const char* operation,
+                                 const char* id_kind) {
+    std::string desc = std::string(id_kind) + " " + std::to_string(wire_id) +
+                       " is out of range; CAPE-OPEN numbers them 1.." +
+                       std::to_string(count);
+    throw ::CAPEOPEN100::Common::Error::ECapeInvalidArgument(
+        /*name*/ "ECapeInvalidArgument",
+        /*code*/ 0,
+        /*description*/ desc.c_str(),
+        /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
+        /*interfaceName*/ "ICapeMINLP",
+        /*operation*/ operation,
+        /*moreInfo*/ "");
+}
+
 std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
-                                   const char* what) {
+                                   const char* operation, const char* id_kind) {
     std::vector<int> ids;
     indicesFromWire(wire, ids);
-    for (int id : ids) {
-        if (id < 0 || id >= count) {
-            throw CORBA::BAD_PARAM();  // 对应规范的 ECapeInvalidArgument 语义
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (ids[i] < 0 || ids[i] >= count) {
+            throwInvalidId(static_cast<int>(wire[static_cast<CORBA::ULong>(i)]), count, operation,
+                           id_kind);
         }
     }
-    (void)what;
     return ids;
 }
 
@@ -98,7 +120,7 @@ void MINLPServant::GetMINLPStructure(const char* structuretype, ct::CapeArrayLon
 
 void MINLPServant::GetMINLPVariableNames(const ct::CapeArrayLong& vids,
                                          ct::CapeArrayString_out vnames) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableNames", "vids");
     std::vector<std::string> names;
     if (model_->getVariableNames(ids, names) < 0) throw CORBA::INTERNAL();
     vnames = new ct::CapeArrayString(toStringSeq(names));
@@ -136,7 +158,7 @@ void MINLPServant::GetMINLPVariableStringAttribute(const ct::CapeArrayLong& /*vi
 
 void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out LB, ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableBounds", "vids");
     std::vector<double> lo, hi;
     if (model_->getVariableBounds(ids, lo, hi) < 0) throw CORBA::INTERNAL();
     LB = new ct::CapeArrayDouble(toDoubleSeq(lo));
@@ -145,7 +167,7 @@ void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "GetMINLPVariableValues", "vids");
     std::vector<double> v;
     if (model_->getVariableValues(ids, v) < 0) throw CORBA::INTERNAL();
     values = new ct::CapeArrayDouble(toDoubleSeq(v));
@@ -153,7 +175,7 @@ void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           const ct::CapeArrayDouble& values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_), "SetMINLPVariableValues", "vids");
     std::vector<double> v;
     fromDoubleSeq(values, v);
     if (model_->setVariableValues(ids, v) < 0) throw CORBA::INTERNAL();
@@ -163,7 +185,7 @@ void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
                                            ct::CapeArrayString_out cnames) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintNames", "cids");
     std::vector<std::string> names;
     if (model_->getConstraintNames(ids, names) < 0) throw CORBA::INTERNAL();
     cnames = new ct::CapeArrayString(toStringSeq(names));
@@ -172,7 +194,7 @@ void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
 void MINLPServant::GetMINLPConstraintBounds(const ct::CapeArrayLong& cids,
                                             ct::CapeArrayDouble_out LB,
                                             ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintBounds", "cids");
     std::vector<double> lo, hi;
     if (model_->getConstraintBounds(ids, lo, hi) < 0) throw CORBA::INTERNAL();
     LB = new ct::CapeArrayDouble(toDoubleSeq(lo));
@@ -210,7 +232,7 @@ void MINLPServant::GetMINLPConstraintStringAttribute(const ct::CapeArrayLong& /*
 
 void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& cids,
                                                      ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPNonlinearConstraintValues", "cids");
     std::vector<double> v;
     if (model_->getNonlinearConstraintValues(ids, v) < 0) throw CORBA::INTERNAL();
     values = new ct::CapeArrayDouble(toDoubleSeq(v));
@@ -219,7 +241,7 @@ void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& ci
 void MINLPServant::GetMINLPConstraintDerivativeValues(const char* structtype,
                                                       const ct::CapeArrayLong& cids,
                                                       ct::CapeArrayDouble_out vals) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_), "GetMINLPConstraintDerivativeValues", "cids");
     std::vector<double> v;
     if (model_->getConstraintDerivativeValues(structtype, ids, v) < 0) throw CORBA::INTERNAL();
     vals = new ct::CapeArrayDouble(toDoubleSeq(v));

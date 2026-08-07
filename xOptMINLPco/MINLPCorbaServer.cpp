@@ -28,8 +28,14 @@
 //  注：Naming Service 绑定（corbaname:）尚未做——它要求另跑一个 naming 进程
 //  才有意义、也才测得了，故与本次分开。IOR 这条路不依赖任何外部服务。
 // ***************************************************************
+// ACE/TAO 必须最先包含：它拉 winsock2.h，而 <windows.h> 默认拉 winsock.h(v1)，
+// 顺序反了会炸出 IPPROTO_IPV6/timeval 一片重定义。
 #include <tao/ORB.h>
 #include <tao/PortableServer/PortableServer.h>
+
+#ifdef _WIN32
+#    include <windows.h>  // MoveFileExA
+#endif
 
 #include <csignal>
 #include <cstdio>
@@ -42,12 +48,34 @@
 
 namespace {
 
-CORBA::ORB_ptr g_orb = CORBA::ORB::_nil();  // 供信号处理器 shutdown 用
+// 信号处理器里能做的只有「置一个标志」。原先这里直接调 orb->shutdown()，
+// 那不是 async-signal-safe——信号可能恰好打断 ORB 自己的运行时状态，
+// 于是 shutdown 在半路的数据结构上跑，轻则死锁重则崩。
+// 真正的退出由主线程完成：主线程带超时轮转事件循环，看见标志就出来。
+volatile std::sig_atomic_t g_stop = 0;
 
-void onSignal(int) {
-    // 只做异步信号安全的最小动作：请求 ORB 退出事件循环，清理交给 main。
-    if (!CORBA::is_nil(g_orb)) g_orb->shutdown(/*wait_for_completion*/ false);
+void onSignal(int) { g_stop = 1; }
+
+#ifdef _WIN32
+// Windows 上光靠 std::signal 是够不着的：这个系统没有 SIGTERM（CRT 里那个常量
+// 基本不会被真正投递），SIGINT 也只在进程有控制台、且经 CRT 的控制台处理时才到。
+// 实测 taskkill 打过来时进程纹丝不动，得靠控制台控制处理器。
+// 它跑在另一个线程而非信号上下文里，但「只置标志」依然是这里该做的最小动作——
+// 换成直接 shutdown 就又回到了 ORB 状态被并发闯入的老问题。
+BOOL WINAPI onConsoleCtrl(DWORD type) {
+    switch (type) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            g_stop = 1;
+            return TRUE;
+        default:
+            return FALSE;
+    }
 }
+#endif
 
 // 控制台输出一律 ASCII：本 exe 是拿去给第三方演示的，源码是 UTF-8，而 Windows
 // 控制台默认 GBK 代码页——中文在那里会变成乱码，正好毁掉演示。注释仍用中文。
@@ -70,6 +98,12 @@ void setProblemDllEnv(const std::string& path) {
 
 // 原子发布：先写临时文件再改名，读者要么看到旧内容要么看到完整新内容，
 // 不会读到写了一半的 IOR。
+//
+// Windows 上必须用 MoveFileExA(MOVEFILE_REPLACE_EXISTING) 而不是
+// remove + std::rename：std::rename 在目标已存在时会失败，所以先 remove 的话，
+// 从 remove 到 rename 之间目标文件是**不存在**的。轮询这个文件的客户端会看到
+// 「文件没了」，于是当成错误或进入重试——那就不再是上面承诺的 old-or-new 了。
+// POSIX 的 rename 本身就是覆盖式原子替换，直接用。
 bool writeIorFileAtomically(const std::string& path, const char* ior) {
     const std::string tmp = path + ".tmp";
     FILE* fp = std::fopen(tmp.c_str(), "wb");
@@ -81,8 +115,11 @@ bool writeIorFileAtomically(const std::string& path, const char* ior) {
         std::remove(tmp.c_str());
         return false;
     }
-    std::remove(path.c_str());  // Windows 的 rename 不覆盖已存在目标
+#ifdef _WIN32
+    if (MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) == 0) {
+#else
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+#endif
         std::remove(tmp.c_str());
         return false;
     }
@@ -98,7 +135,6 @@ int main(int argc, char** argv) {
     try {
         // ORB_init 先跑：它会就地摘掉 -ORB* 参数，剩下的才轮到我们解析。
         CORBA::ORB_var orb = CORBA::ORB_init(argc, argv);
-        g_orb = orb.in();
 
         for (int i = 1; i < argc; ++i) {
             const std::string a = argv[i];
@@ -151,13 +187,24 @@ int main(int argc, char** argv) {
 
         std::signal(SIGINT, onSignal);
         std::signal(SIGTERM, onSignal);
+#ifdef _WIN32
+        SetConsoleCtrlHandler(onConsoleCtrl, TRUE);
+#endif
 
-        orb->run();
+        // 带超时轮转事件循环，而不是 orb->run() 一直阻塞：信号处理器只置标志
+        // （见上），停机得由主线程发起。超时值只影响 Ctrl-C 后的退出延迟。
+        while (g_stop == 0) {
+            ACE_Time_Value tv(0, 200 * 1000);  // 200ms
+            orb->run(tv);
+        }
 
-        // 走到这里说明 shutdown 被调用过：先摘 servant 再销毁 ORB。
+        // 到这里是主线程上下文，调 shutdown 是安全的。
+        // 顺序要紧：deactivate_object 必须在 shutdown 之前。反过来的话 POA 已经
+        // 不再受理操作，deactivate_object 抛 BAD_INV_ORDER——实测如此。
+        std::cerr << "xOptMINLPcoCorbaServer: shutting down\n";
         poa->deactivate_object(oid.in());
+        orb->shutdown(/*wait_for_completion*/ false);
         orb->destroy();
-        g_orb = CORBA::ORB::_nil();
         return 0;
     } catch (const CORBA::Exception& e) {
         std::cerr << "CORBA exception: " << e._name() << "\n";

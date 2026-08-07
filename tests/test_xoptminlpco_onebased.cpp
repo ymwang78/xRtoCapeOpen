@@ -134,20 +134,41 @@ TEST_F(OneBasedWireTest, SetValuesByOneBasedIdsHitsTheRightVariables) {
 }
 
 // 关键回归：0 在 1-based 里是非法的。v1 会把它当成内部下标 0 悄悄返回 x0。
+//
+// 断言的是 IDL 里**声明过**的 ECapeInvalidArgument，而不是 CORBA 系统异常：
+// 第三方 CO 客户端 catch 的就是这个用户异常，抛系统异常等于让它收到一个
+// 未声明的东西，正好破坏本项目要的互操作性。
 TEST_F(OneBasedWireTest, ZeroIsRejectedBecauseNumberingStartsAtOne) {
     ct::CapeArrayString_var names;
-    EXPECT_THROW(minlp_->GetMINLPVariableNames(wireIds({0}), names.out()), CORBA::BAD_PARAM);
+    EXPECT_THROW(minlp_->GetMINLPVariableNames(wireIds({0}), names.out()),
+                 ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
 }
 
 // 关键回归：nv+1 越界。v1 的 pick() 对越界 id 静默返回 T{}——
 // 于是最后一个变量会变成 0 而不报错。
 TEST_F(OneBasedWireTest, PastTheEndIsRejectedNotSilentlyZeroed) {
     ct::CapeArrayString_var names;
-    EXPECT_THROW(minlp_->GetMINLPVariableNames(wireIds({3}), names.out()), CORBA::BAD_PARAM);
+    EXPECT_THROW(minlp_->GetMINLPVariableNames(wireIds({3}), names.out()),
+                 ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
 
     ct::CapeArrayDouble_var cons;
     EXPECT_THROW(minlp_->GetMINLPNonlinearConstraintValues(wireIds({2}), cons.out()),
-                 CORBA::BAD_PARAM);  // nc == 1，故 2 越界
+                 ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);  // nc == 1，故 2 越界
+}
+
+// 规范（Error Common Interface §3.3）说 interfaceName / operation 是必填字段。
+// 光抛对类型不够——PME 拿它去定位问题，字段是空的就没意义。
+TEST_F(OneBasedWireTest, InvalidArgumentCarriesTheMandatoryFields) {
+    try {
+        ct::CapeArrayDouble_var lb, ub;
+        minlp_->GetMINLPVariableBounds(wireIds({99}), lb.out(), ub.out());
+        FAIL() << "越界 id 竟然没有报错";
+    } catch (const ::CAPEOPEN100::Common::Error::ECapeInvalidArgument& e) {
+        EXPECT_STREQ(e.interfaceName.in(), "ICapeMINLP");
+        EXPECT_STREQ(e.operation.in(), "GetMINLPVariableBounds");
+        EXPECT_NE(std::string(e.description.in()).find("99"), std::string::npos)
+            << "description 应指出是哪个 id 越界: " << e.description.in();
+    }
 }
 
 // 规范里空序列表示「全部」，不应被当成越界。

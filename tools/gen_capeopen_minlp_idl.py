@@ -96,8 +96,22 @@ def norm_type(raw):
 def parse_methods(text):
     """Parse the section 3.6 method tables into [{iface, method, args, errs}]."""
     lines = text.splitlines()
-    start = next(i for i, l in enumerate(lines) if l.strip() == '3.6 Interface descriptions')
-    end = next(i for i, l in enumerate(lines) if l.strip().startswith('3.7 Scenarios'))
+
+    # 这两个边界是靠 PDF 抽出来的正文标题定位的，而抽文结果会随 pypdf 版本、
+    # 文档版本、甚至字距而变。找不到时裸 StopIteration 的 traceback 说明不了
+    # 任何事——这个生成器的整体设计就是「解析不出来就明确拒绝」，边界定位没有
+    # 理由例外。
+    def find(predicate, what):
+        idx = next((i for i, l in enumerate(lines) if predicate(l.strip())), None)
+        if idx is None:
+            raise RuntimeError(
+                f'cannot locate {what} in the extracted text of {OPT_PDF}. '
+                f'The heading may have changed, or pypdf may be extracting it '
+                f'differently -- dump the text and adjust the boundary predicate.')
+        return idx
+
+    start = find(lambda s: s == '3.6 Interface descriptions', 'the start of section 3.6')
+    end = find(lambda s: s.startswith('3.7 Scenarios'), 'the start of section 3.7')
 
     methods, cur, mode = [], None, None
     for line in lines[start:end]:
