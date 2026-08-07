@@ -125,6 +125,16 @@ if(XOPTMINLPCO_BUILD_TESTS)
         target_link_libraries(test_xoptminlpco_corba PRIVATE xoptminlpco_corba GTest::gtest)
         add_test(NAME XOptMINLPcoCorbaTest COMMAND test_xoptminlpco_corba)
 
+        # 索引基的非回环校验：直接对着 CORBA stub 手工构造 1-based 入参、手工
+        # 写死 1-based 期望值。上面那条回环用例两端都是我们自己，一起偏也照绿。
+        add_executable(test_xoptminlpco_onebased
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_onebased.cpp
+        )
+        target_link_libraries(test_xoptminlpco_onebased PRIVATE xoptminlpco_corba GTest::gtest)
+        target_include_directories(test_xoptminlpco_onebased PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+        add_test(NAME XOptMINLPcoOneBasedTest COMMAND test_xoptminlpco_onebased)
+
         # 真·跨进程：起 xOptMINLPcoCorbaServer.exe，读它发布的 IOR，经
         # corba: 连接串连回来。与上面的 collocated 用例互补——那条走注入构造，
         # 从不碰 string_to_object/_narrow，也就验不到 IIOP。
