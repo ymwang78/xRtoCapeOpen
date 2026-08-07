@@ -170,11 +170,17 @@ int t_getSlateIdOfPort(xOptModelHandle /*h*/, bool /*is_input_port*/, int /*port
 
 int t_setSlate(xOptModelHandle /*h*/, int /*slate_index*/, const xOptSlate* /*slate*/) { return 0; }
 
-int t_generateEstimate(xOptModelHandle /*h*/, double /*initx*/[], int& size,
+// 「生成初值」：CAPE-OPEN MINLP 没有对应能力——ICapeMINLP 里没有任何一个方法
+// 是「给定固定变量求一个好起点」的语义，GetMINLPVariableValues 只是读当前值，
+// 而当前值恰恰就是宿主刚在 buildProblem 里 setX 推下来的那一组。所以这里正确的
+// 行为是原样退回调用方给的点，而不是伪造一个。
+//
+// 关键：**必须原样保留 size**。宿主(xOptModelBlackBox::generateEstimate)按
+// `estimate_size != init_x.size()` 判失败，写 size = 0 会让整个「生成初值」报错。
+int t_generateEstimate(xOptModelHandle /*h*/, double /*initx*/[], int& /*size*/,
                        const char /*fixed_var_names*/[], const double /*fixed_var_values*/[],
                        int /*fixed_var_size*/) {
-    size = 0;
-    return 0;
+    return 0;  // 无估计能力：保留调用方传入的初值与 size
 }
 
 int t_getReportMetaAbstracts(xOptModelHandle /*h*/, const char* /*names*/[], const char* /*titles*/[],

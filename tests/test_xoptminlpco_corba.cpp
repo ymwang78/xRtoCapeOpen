@@ -6,7 +6,7 @@
 // ***************************************************************
 //  N4 回环（CORBA 方向，同时验证两个方向）：
 //    xOptProblem(Mock) → XOptMINLPAdapter(ICapeMINLPModel)
-//      → MINLPServant(POA SqpSolver::ICapeMINLP)         ← xOptMINLPco 生产者
+//      → MINLPServant(POA ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP)         ← xOptMINLPco 生产者
 //        → collocated → capeopen_core CapeMINLPModelCorba(注入)  ← capeopen_core 消费者
 //          → 读回，与解析值对拍。
 //  自带 main。
@@ -41,7 +41,7 @@ TEST(XOptMINLPcoCorbaLoopback, RoundTrip) {
     MINLPServant* servant = new MINLPServant(&adapter);
     PortableServer::ObjectId_var oid = poa->activate_object(servant);
     CORBA::Object_var obj = poa->id_to_reference(oid.in());
-    SqpSolver::ICapeMINLP_var ref = SqpSolver::ICapeMINLP::_narrow(obj.in());
+    ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP_var ref = ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP::_narrow(obj.in());
 
     // 消费者：capeopen_core 的 CORBA 后端，注入上面的引用
     CapeMINLPModelCorba consumer(ref.in());

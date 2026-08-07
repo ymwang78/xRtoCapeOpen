@@ -27,3 +27,7 @@ CMakeFiles/
 
 # Third-party CAPE-OPEN spec archives (re-downloadable from CO-LaN; keep repo lean)
 docs/*.zip
+# ...and their extracted copies. tools/gen_capeopen_minlp_idl.py reads the PDFs
+# from here, so the directories show up locally, but they are the same content
+# as the ignored archives above.
+docs/CAPE OPEN */

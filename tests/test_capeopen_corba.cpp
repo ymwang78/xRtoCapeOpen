@@ -24,8 +24,8 @@
 namespace {
 
 // 懒创建一个 collocated 的 ICapeMINLP 引用（ORB/POA/servant 故意泄漏，测试进程退出回收）。
-SqpSolver::ICapeMINLP_ptr getRef() {
-    static SqpSolver::ICapeMINLP_ptr ref = nullptr;
+::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP_ptr getRef() {
+    static ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP_ptr ref = nullptr;
     if (ref) return ref;
     int argc = 0;
     CORBA::ORB_ptr orb = CORBA::ORB_init(argc, static_cast<char**>(nullptr));
@@ -35,7 +35,7 @@ SqpSolver::ICapeMINLP_ptr getRef() {
     RefCapeMINLPServant* servant = new RefCapeMINLPServant();
     PortableServer::ObjectId_var oid = poa->activate_object(servant);
     CORBA::Object_var obj = poa->id_to_reference(oid.in());
-    ref = SqpSolver::ICapeMINLP::_narrow(obj.in());
+    ref = ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP::_narrow(obj.in());
     return ref;
 }
 

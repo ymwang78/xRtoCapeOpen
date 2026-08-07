@@ -6,7 +6,15 @@
 //  Copyright (C) 2026 - All Rights Reserved
 // ***************************************************************
 //  CORBA/TAO 后端：把一个实现 CAPE-OPEN ICapeMINLP 的 CORBA 对象适配为
-//  传输无关的 ICapeMINLPModel（design §3.1/§3.3）。复用 SqpSolver* stub。
+//  传输无关的 ICapeMINLPModel（design §3.1/§3.3）。
+//
+//  用官方模块路径的 stub（CAPEOPEN100_Minlp.idl，见 design §6）而非自造的
+//  SqpSolver 模块：_narrow 判的是 Repository ID，用自造模块的 stub 去
+//  _narrow 一个真实 CO 组件的引用**必然返回 nil**，方法签名对不对都一样。
+//
+//  索引基：本类是「内部 0-based」与「线上 1-based」的分界线之一（另一处是
+//  生产端 MINLPServant）。vids/cids 出网时 +1，结构索引入网时 -1。
+//  详见 CapeCorbaMarshal.h 顶部。
 //
 //  target：IOR / corbaloc / corbaname 字符串；connect() 内 ORB_init +
 //  string_to_object + _narrow。另有注入构造（传入已 _narrow 的对象引用），
@@ -16,13 +24,13 @@
 #include <string>
 
 #include "../../CapeMINLPModel.h"
-#include "SqpSolverC.h"
+#include "CAPEOPEN100_MinlpC.h"
 
 class CapeMINLPModelCorba : public ICapeMINLPModel {
   public:
     explicit CapeMINLPModelCorba(const std::string& target);
     // 注入：使用已有对象引用（会 _duplicate），不 ORB_init。
-    explicit CapeMINLPModelCorba(SqpSolver::ICapeMINLP_ptr injected);
+    explicit CapeMINLPModelCorba(::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP_ptr injected);
     ~CapeMINLPModelCorba() override;
 
     int connect() override;
@@ -53,7 +61,7 @@ class CapeMINLPModelCorba : public ICapeMINLPModel {
     int fail(const std::string& msg) const;
 
     std::string target_;
-    SqpSolver::ICapeMINLP_var minlp_;
+    ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP_var minlp_;
     bool orb_owned_ = false;  // 是否由本对象 ORB_init（注入时为 false）
     mutable std::string last_error_;
 };

@@ -59,24 +59,42 @@ if(WITH_CAPEOPEN_CORBA)
     set(TAO_LIB_DIR "${TAO_TRIPLET_DIR}/lib")
     set(TAO_IDL_EXE "${TAO_TRIPLET_DIR}/tools/ace/tao_idl.exe")
 
-    set(IDL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../SqpSolver.idl")
     set(IDL_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/idlgen")
     file(MAKE_DIRECTORY ${IDL_GEN_DIR})
+
+    # 官方模块路径的 IDL（重建，见 tools/gen_capeopen_minlp_idl.py 与
+    # docs/xOptMINLPco_design.md §6）。MINLP 通路的消费端与生产端都用它。
+    # 仓库根的 SqpSolver.idl 不再参与本通路（它属于旧 solver 侧代码）。
     # tao_idl 需要显式指定预处理器(cl.exe)；用 CMAKE_CXX_COMPILER。
+    set(CO_IDL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../CAPEOPEN100_Minlp.idl")
     add_custom_command(
-        OUTPUT ${IDL_GEN_DIR}/SqpSolverC.cpp ${IDL_GEN_DIR}/SqpSolverS.cpp
-               ${IDL_GEN_DIR}/SqpSolverC.h  ${IDL_GEN_DIR}/SqpSolverS.h
-        COMMAND "${TAO_IDL_EXE}" -Yp,${CMAKE_CXX_COMPILER} -I "${TAO_INCLUDE_DIR}" -o "${IDL_GEN_DIR}" "${IDL_FILE}"
-        DEPENDS "${IDL_FILE}"
-        COMMENT "tao_idl: generating SqpSolver stubs"
+        OUTPUT ${IDL_GEN_DIR}/CAPEOPEN100_MinlpC.cpp ${IDL_GEN_DIR}/CAPEOPEN100_MinlpS.cpp
+               ${IDL_GEN_DIR}/CAPEOPEN100_MinlpC.h  ${IDL_GEN_DIR}/CAPEOPEN100_MinlpS.h
+        COMMAND "${TAO_IDL_EXE}" -Yp,${CMAKE_CXX_COMPILER} -I "${TAO_INCLUDE_DIR}" -o "${IDL_GEN_DIR}" "${CO_IDL_FILE}"
+        DEPENDS "${CO_IDL_FILE}"
+        COMMENT "tao_idl: generating CAPEOPEN100 (official module path) stubs"
         VERBATIM)
 
+    add_library(capeopen100_minlp STATIC
+        ${IDL_GEN_DIR}/CAPEOPEN100_MinlpC.cpp
+        ${IDL_GEN_DIR}/CAPEOPEN100_MinlpS.cpp
+    )
+    target_include_directories(capeopen100_minlp PUBLIC ${IDL_GEN_DIR} ${TAO_INCLUDE_DIR})
+    target_compile_definitions(capeopen100_minlp PUBLIC
+        WIN32 ACE_AS_STATIC_LIBS=1 TAO_AS_STATIC_LIBS=1)
+    target_link_directories(capeopen100_minlp PUBLIC ${TAO_LIB_DIR})
+    target_link_libraries(capeopen100_minlp PUBLIC
+        TAO_PortableServers TAO_AnyTypeCodes TAOs ACEs
+        ws2_32 mswsock advapi32 user32 iphlpapi)
+
+    # MINLP 通路已迁到官方模块路径的 stub（capeopen100_minlp）。SqpSolver.idl
+    # 仍为仓库根的旧 solver 侧代码保留，但不再参与本通路：用自造模块的 stub
+    # 去 _narrow 一个真实 CO 组件的引用必然返回 nil。
     add_library(capeopen_corba STATIC
-        ${IDL_GEN_DIR}/SqpSolverC.cpp
-        ${IDL_GEN_DIR}/SqpSolverS.cpp
         backend/corba/CapeMINLPModelCorba.cpp
         backend/corba/CapeRegisterCorbaBackend.cpp
     )
+    target_link_libraries(capeopen_corba PUBLIC capeopen100_minlp)
     target_include_directories(capeopen_corba PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR} ${XOPT_INCLUDE_DIR} ${IDL_GEN_DIR} ${TAO_INCLUDE_DIR})
     target_compile_definitions(capeopen_corba PUBLIC
@@ -130,5 +148,13 @@ if(CAPEOPEN_CORE_BUILD_TESTS)
         )
         target_link_libraries(test_capeopen_corba PRIVATE capeopen_corba GTest::gtest)
         add_test(NAME CapeOpenCorbaTest COMMAND test_capeopen_corba)
+
+        # 重建 IDL 的 Repository ID 断言。RID 由 module 嵌套隐式推出，改错了
+        # 编译照过、测试照绿，只在对接真实 PME 时才炸——故显式钉死。
+        add_executable(test_capeopen100_rid
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_capeopen100_rid.cpp
+        )
+        target_link_libraries(test_capeopen100_rid PRIVATE capeopen100_minlp GTest::gtest)
+        add_test(NAME CapeOpen100RidTest COMMAND test_capeopen100_rid)
     endif()
 endif()

@@ -102,6 +102,83 @@ TEST_F(XOptMINLPcoAdapterTest, Evaluate_AgainstAnalytic) {
 
 }  // namespace
 
+// 规范：GetMINLPConstraintDerivativeValues 取 cids 指定的**子集**。
+// mock 只有一个约束，覆盖不到真正的过滤，这里用一个多约束问题补上——
+// 原实现整个忽略 cids、永远返回整表 nnz，子集请求会静默拿到错误的长度和含义。
+namespace {
+
+// 3 变量 2 约束：c0 = x0 + x1，c1 = x1 + x2；Jacobian 行 {0,0,1,1}
+class TwoConstraintProblem : public MockXOptProblem {
+  public:
+    int numVariables() const override { return 3; }
+    int numConstraints() const override { return 2; }
+    int getConstraintNames(const char* names[], int n) const override {
+        if (n > 0) names[0] = "c0";
+        if (n > 1) names[1] = "c1";
+        return n;
+    }
+    int getConstraintBounds(double* lo, double* hi, int n) const override {
+        for (int i = 0; i < n; ++i) { lo[i] = 0.0; hi[i] = 10.0; }
+        return n;
+    }
+    int getVariableNames(const char* names[], int n) const override {
+        static const char* kN[] = {"x0", "x1", "x2"};
+        for (int i = 0; i < n && i < 3; ++i) names[i] = kN[i];
+        return n;
+    }
+    int getVariableBounds(double* lo, double* hi, int n) const override {
+        for (int i = 0; i < n; ++i) { lo[i] = -10.0; hi[i] = 10.0; }
+        return n;
+    }
+    int getInitialX(double* x0, int n) const override {
+        for (int i = 0; i < n; ++i) x0[i] = 0.0;
+        return n;
+    }
+    int getConstraintJacobianStructure(int* row, int* col, int& nnz) const override {
+        if (row == nullptr || col == nullptr) { nnz = 4; return 0; }
+        const int r[] = {0, 0, 1, 1}, c[] = {0, 1, 1, 2};
+        for (int i = 0; i < 4; ++i) { row[i] = r[i]; col[i] = c[i]; }
+        nnz = 4;
+        return 0;
+    }
+    // 取可区分的值，才能看出返回的是哪几个
+    int evaluateConstraintsJacobianValues(double* v, int n) const override {
+        const double all[] = {11.0, 12.0, 21.0, 22.0};
+        for (int i = 0; i < n && i < 4; ++i) v[i] = all[i];
+        return 0;
+    }
+    int evaluateConstraints(double* cons, int n) const override {
+        for (int i = 0; i < n; ++i) cons[i] = 0.0;
+        return 0;
+    }
+};
+
+TEST(XOptMINLPcoAdapterSubsetTest, ConstraintDerivativesFilterByCids) {
+    TwoConstraintProblem problem;
+    XOptMINLPAdapter adapter(&problem);
+    ASSERT_EQ(adapter.connect(), 0) << adapter.lastError();
+
+    std::vector<double> only_c0;
+    ASSERT_EQ(adapter.getConstraintDerivativeValues("Jacobian", {0}, only_c0), 0)
+        << adapter.lastError();
+    EXPECT_EQ(only_c0, (std::vector<double>{11.0, 12.0})) << "只要 c0 却拿到了别的约束";
+
+    std::vector<double> only_c1;
+    ASSERT_EQ(adapter.getConstraintDerivativeValues("Jacobian", {1}, only_c1), 0)
+        << adapter.lastError();
+    EXPECT_EQ(only_c1, (std::vector<double>{21.0, 22.0}));
+
+    std::vector<double> both;
+    ASSERT_EQ(adapter.getConstraintDerivativeValues("Jacobian", {}, both), 0);
+    EXPECT_EQ(both, (std::vector<double>{11.0, 12.0, 21.0, 22.0})) << "空 cids 应表示全部";
+
+    std::vector<double> bad;
+    EXPECT_LT(adapter.getConstraintDerivativeValues("Jacobian", {5}, bad), 0)
+        << "越界 cid 应报错而不是静默返回";
+}
+
+}  // namespace
+
 #ifndef USE_GTEST_MAIN
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

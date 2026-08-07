@@ -106,4 +106,29 @@ TEST(CapeOpenModelTest, BuildProblem_DrivesMockEndToEnd) {
     model.destroyModel(model.handle);
 }
 
+// 复刻 xOptModelBlackBox::generateEstimate 的判定：模型必须原样退回 size，
+// 否则宿主整个「生成初值」失败（返回 -1，界面报"设置初始值失败"）。
+// 本项目无估计能力，约定是保留调用方给的点，而不是把 size 置 0。
+TEST(CapeOpenModelTest, GenerateEstimate_PreservesCallerSizeAndValues) {
+    xOptModelT model{sizeof(xOptModelT)};
+    ASSERT_EQ(xOptModel_createModel(&model, nullptr, "mock:default"), 0);
+    ASSERT_NE(model.generateEstimate, nullptr);
+
+    std::vector<double> init_x = {3.0, 4.0};
+    // 宿主把固定变量名打包成 '\0' 分隔的连续缓冲，值与之一一对应
+    const char packed_names[] = "x0\0";
+    const double packed_values[] = {3.0};
+
+    int estimate_size = static_cast<int>(init_x.size());
+    const int ret = model.generateEstimate(model.handle, init_x.data(), estimate_size, packed_names,
+                                           packed_values, 1);
+
+    EXPECT_GE(ret, 0);                                              // 宿主判失败用 < 0
+    EXPECT_EQ(estimate_size, static_cast<int>(init_x.size()));      // 宿主要求 size 不变
+    EXPECT_DOUBLE_EQ(init_x[0], 3.0);                               // 调用方的点原样保留
+    EXPECT_DOUBLE_EQ(init_x[1], 4.0);
+
+    model.destroyModel(model.handle);
+}
+
 }  // namespace
