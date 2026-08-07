@@ -254,14 +254,28 @@ HEADER = '''// =================================================================
 //
 //  KNOWN DEVIATIONS -- check these against the official .idl when it arrives
 //
-//    1. The exception *members* in module Common::Error are reconstructed. The
-//       Error specification section 3.3 gives the conceptual attributes
+//    1. The exception *members* in module Common::Error are reconstructed, and
+//       this is the ACTIVE risk in this file -- read it before interoperating.
+//
+//       The Error specification section 3.3 gives the conceptual attributes
 //       (ECapeRoot.name plus ECapeUser.{code, description, scope,
-//       interfaceName, operation, moreInfo}) but not the exact CORBA IDL form.
-//       Blast radius: a raises clause takes no part in the Repository ID and
-//       does not affect GIOP encoding of successful calls; it only matters when
-//       an exception is actually thrown, where a third-party client would fail
-//       to decode our exception body.
+//       interfaceName, operation, moreInfo}) but not the exact CORBA IDL form,
+//       so the member list and order below are inferred. The uniform member set
+//       used here is also known to be incomplete: section 3.3 gives
+//       ECapeInvalidArgument an additional `position` attribute, which is not
+//       reproduced.
+//
+//       What that costs on the wire: a Repository ID does not depend on a
+//       raises clause, and successful calls are unaffected. But the servant
+//       does raise ECapeInvalidArgument (an out-of-range vid/cid, which a real
+//       solver will hit) and ECapeUnknown (any model-side failure), so this is
+//       a path clients exercise, not a theoretical one. If the official member
+//       layout differs, a client compiled from the official IDL decodes our
+//       exception body wrongly -- most likely surfacing as CORBA::MARSHAL
+//       instead of the clean "invalid argument" we meant to report.
+//
+//       Until the official .idl is available, treat a marshalling failure on an
+//       error path as this deviation until proven otherwise.
 //
 //    2. The UNDEFINED constants of Common::Types are omitted. The document
 //       writes them in mathematical notation (e.g. -2^31), which is not legal

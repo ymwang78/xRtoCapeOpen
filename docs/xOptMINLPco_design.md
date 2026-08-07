@@ -227,9 +227,8 @@ xOptProblem 的 0-based 下标。全程无转换。
 两件事一起做，因为动的是同一批方法，且单改索引基会让回环测试全红（两端得同步改）。
 
 - `MINLPServant` 改继承 `POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP`，32 个方法
-  全部实现（缺口 3 关闭）。ICapeMINLPModel 覆盖不到的（属性族、变量类型、约束线性性、
-  Lagrange）抛 `CORBA::NO_IMPLEMENT`——系统异常，不需要出现在 raises 子句里，且语义准确；
-  Hessian 三件套抛规范专设的 `ECapeHessianInfoNotAvailable`。**不返回空值冒充真答案。**
+  全部实现（缺口 3 关闭）。能力边界见 §6.4；**不返回空值冒充真答案**——求解器分不出
+  「空梯度」和「我没实现」。
 - 消费端 `CapeMINLPModelCorba` 同步迁移：用自造模块的 stub 去 `_narrow` 一个真实 CO 组件
   必然返回 nil，消费端不迁就永远连不上真实组件。
 - **索引基（缺口 2 关闭）**：约定为「`ICapeMINLPModel` 及其以内保持 0-based，转换只发生在
@@ -237,8 +236,10 @@ xOptProblem 的 0-based 下标。全程无转换。
   换基函数与普通 long 序列的转换函数**分开命名**（`indicesToWire`/`indicesFromWire` vs
   `toLongSeq`/`fromLongSeq`）：ICapeMINLP 里既有要换基的量也有不换基的量
   （`GetMINLPVariableIntegerAttribute` 的 values 就是普通整数属性），共用一个函数时误用无征兆。
-- 越界 id 抛 `CORBA::BAD_PARAM` 而非静默放过。v1 的 `pick()` 对越界 id 返回 `T{}`，
-  于是「求解器发了个非法 id」会变成「悄悄返回 0」。
+- 越界 id 抛 IDL 里**声明过**的 `ECapeInvalidArgument`（模型侧失败抛 `ECapeUnknown`），
+  而非静默放过、也不用系统异常。v1 的 `pick()` 对越界 id 返回 `T{}`，于是「求解器发了个
+  非法 id」会变成「悄悄返回 0」；而抛系统异常则让 catch 用户异常的第三方客户端收到未声明
+  的东西。注意这条同时把 §6.6 的异常体风险从「理论」变成了「活跃」。
 - `RefCapeMINLPServant`（capeopen_core 里扮演第三方 CO 组件的参考实现）同步迁移，并**刻意
   不复用** `indicesToWire/FromWire`，自己写一份加减一。它存在的意义就是给消费端换基做独立
   校验；共用 helper 的话，helper 里的错会让两端一致地偏、测试照样全绿。
@@ -291,11 +292,43 @@ PME 实际走的路径，也是 `_is_a` 真正被考的地方。
 |------|------|------|
 | 连续变量、非线性约束、目标与一阶导数 | ✅ 完整 | 这是 `xOptProblem` 的能力范围 |
 | 变量类型 / 约束线性性 | ⚠️ 推导 | `GetMINLPSize` 上报 `niv=0`/`nlc=0`，故一律回 false。**这不是编造**——是从我们自己上报的规模推出来的。若哪天 `niv>0` 而又说不出是哪几个，则抛 `NO_IMPLEMENT` |
+| 约束导数子集（`cids`） | ✅ 完整 | 按 `cids` 真过滤；空表示全部；越界报错 |
 | Boolean/Integer/String 属性族 | ❌ `NO_IMPLEMENT` | `ICapeMINLPModel` 无此概念 |
 | Hessian | ❌ `ECapeHessianInfoNotAvailable` | 规范为此专设的异常 |
 | Lagrange 乘子 | ❌ `NO_IMPLEMENT` | |
 
 一律不返回空值冒充真答案：求解器分不出「空梯度」和「我没实现」。
+
+**对 PME 的实际影响**：会调属性族 / Hessian / Lagrange 的求解器，在这些调用上会收到
+`NO_IMPLEMENT`（或 Hessian 专设异常）。若该 PME 把任一异常当致命错误，整个求解就会中止——
+即便它要的能力对本问题其实无关紧要。所以**对接前应先确认对方的求解器只用到上表 ✅/⚠️ 的部分**，
+或确认它对 `NO_IMPLEMENT` 是降级而非中止。这就是把它叫「NLP-only profile」而不是
+「完整 ICapeMINLP」的原因。
+
+### 6.6 残留风险：**「CORBA 侧修好了」≠「组件已合规」**
+
+§6.2 的三个缺口都关了，但下面这些仍未解决。对第三方宣称合规前请逐条过一遍。
+
+| 风险 | 状态 | 影响 |
+|------|------|------|
+| 重建的 `Common::Error` 异常成员未与官方 IDL 核对 | 🔴 **活跃** | 见下 |
+| COM 绑定仍 0-based | 🔴 **不合规** | §6.5 |
+| 能力上是 NLP-only，非完整 MINLP | 🟡 需明示 | §6.4 |
+| 未经第三方 ORB 实测 | 🟡 未验证 | 步骤 4，目前所有验证两端都是我们的代码 |
+
+**为什么异常体风险从「理论」升级成了「活跃」**：这一条最初记录时，我们从不抛这些用户异常
+（越界抛 `BAD_PARAM`、模型失败抛 `INTERNAL`，都是系统异常），所以「重建的成员布局不对也没人
+碰得到」。评审推动的两轮修复把它们改成了抛**声明过的** `ECapeInvalidArgument` /
+`ECapeUnknown`——这是对的，但也意味着重建的异常体现在位于**客户端真会走到的路径**上
+（越界 vid/cid 是真实求解器会撞到的）。
+
+若官方成员布局与我们的不同，第三方按官方 IDL 解码我们的异常体会失败，多半表现为
+`CORBA::MARSHAL`——本来想报的那个干净的「参数非法」反而变成一个费解的编解码错误。
+已知我们的统一成员集至少缺 `ECapeInvalidArgument` 的 `position`（规范 §3.3 有）。
+
+修复只能等官方 `CAPE-OPENv1-0-0.idl`：在没有它的情况下继续猜成员只会增加分歧面，不会降低风险。
+在那之前，**错误路径上的 marshalling 失败应先按这一条排查**。同样的说明也写在
+`CAPEOPEN100_Minlp.idl` 文件头「已知偏差 1」里——那才是第三方会读到的地方。
 
 ### 6.5 已知缺口：**COM 绑定仍是 0-based**
 
