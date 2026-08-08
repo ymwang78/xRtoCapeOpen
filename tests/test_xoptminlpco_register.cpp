@@ -65,7 +65,8 @@ TEST(XOptMINLPcoRegister, ActivateViaCoCreateInstance) {
         GTEST_SKIP() << "DllRegisterServer failed (registry permission?) — skipping activation";
     }
 
-    ASSERT_EQ(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), S_OK);
+    // 线程上已初始化过 COM 时返回 S_FALSE，那也是成功——按 S_OK 硬判会脆。
+    ASSERT_TRUE(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)));
 
     // 经注册表激活（CoCreateInstance），而非注入 —— 验证类厂/导出/生产 ctor 全路径
     ICapeMINLP* minlp = nullptr;
@@ -133,25 +134,27 @@ TEST(XOptMINLPcoRegister, ActivateViaCoCreateInstance) {
 
     // 注销后必须枚举不到，否则会留下指向已卸载组件的陈旧条目。
     {
-        ASSERT_EQ(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED), S_OK);
+        ASSERT_TRUE(SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)));
+        // 与注册后那段对称地用 ASSERT：同一条路径在注销前已经证明可用，此时再失败
+        // 只可能是环境异常，不该让下面那条断言被静默跳过——否则本 PR 强调的
+        // 「注销后枚举不到」这个保证，测试其实没咬住。
         ICatInformation* cat = nullptr;
-        if (SUCCEEDED(CoCreateInstance(CLSID_StdComponentCategoriesMgr, nullptr,
-                                       CLSCTX_INPROC_SERVER, IID_ICatInformation,
-                                       reinterpret_cast<void**>(&cat)))) {
-            CATID want = CATID_CapeOpenComponent;
-            IEnumCLSID* e = nullptr;
-            if (SUCCEEDED(cat->EnumClassesOfCategories(1, &want, 0, nullptr, &e))) {
-                bool still = false;
-                CLSID got;
-                ULONG fetched = 0;
-                while (e->Next(1, &got, &fetched) == S_OK && fetched == 1) {
-                    if (IsEqualCLSID(got, CLSID_XOptMINLP)) { still = true; break; }
-                }
-                e->Release();
-                EXPECT_FALSE(still) << "注销后仍能枚举到——留下了陈旧的类别条目";
-            }
-            cat->Release();
+        ASSERT_EQ(CoCreateInstance(CLSID_StdComponentCategoriesMgr, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_ICatInformation, reinterpret_cast<void**>(&cat)),
+                  S_OK);
+        CATID want = CATID_CapeOpenComponent;
+        IEnumCLSID* e = nullptr;
+        ASSERT_EQ(cat->EnumClassesOfCategories(1, &want, 0, nullptr, &e), S_OK);
+
+        bool still = false;
+        CLSID got;
+        ULONG fetched = 0;
+        while (e->Next(1, &got, &fetched) == S_OK && fetched == 1) {
+            if (IsEqualCLSID(got, CLSID_XOptMINLP)) { still = true; break; }
         }
+        e->Release();
+        cat->Release();
+        EXPECT_FALSE(still) << "注销后仍能枚举到——留下了陈旧的类别条目";
         CoUninitialize();
     }
 

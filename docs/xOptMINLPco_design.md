@@ -84,7 +84,9 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `CoMINLP()`（经 `XRTO_XOPT_PROBLEM_DLL` 加载 mock DLL）→ 驱动 `ICapeMINLP`(obj=25) +
     `ICapeIdentification` → 注销。**1/1 通过**（注册失败则 GTEST_SKIP）。验证注入未覆盖的整条
     激活/类厂/生产 ctor/跨 DLL 加载路径。
-  - [ ] 待办：真正独立进程的 COM 客户端 exe → issue #4；MINLP CATID 注册（PME 发现）→ issue #5。
+    2026-08 起同时断言**按 CAPE-OPEN 类别枚举能找到本组件**（`EnumClassesOfCategories`，
+    即 PME 的发现路径），并断言注销后枚举不到——见 §6.7。
+  - [ ] 待办：真正独立进程的 COM 客户端 exe → issue #4。
 - **N4 — CORBA 前端**  ✅ 已落地（2026-06）
   - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `ICapeMINLP` 委托 `ICapeMINLPModel`
     （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试），复用 `CapeCorbaMarshal`。

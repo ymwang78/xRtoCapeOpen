@@ -17,6 +17,10 @@ static const CLSID CLSID_XOptMINLP = {
     0x7B2C9E10, 0x5A3D, 0x4C8E, {0x9F, 0x21, 0x0A, 0x1B, 0x2C, 0x3D, 0x4E, 0x5F}};
 
 #define XOPTMINLPCO_PROGID L"xOpt.MINLP.1"
+// 显示名与描述：注册表的 CapeDescription 与运行时 ICapeIdentification 用**同一对**
+// 常量，两者不会漂移——PME 在组件列表里看到的，和它 CoCreateInstance 之后
+// 问出来的，必须是同一个东西。
+#define XOPTMINLPCO_NAME L"xOpt MINLP"
 #define XOPTMINLPCO_FRIENDLY L"xOpt problem published as CAPE-OPEN MINLP"
 
 // ---- CAPE-OPEN 组件类别（CATID）----
