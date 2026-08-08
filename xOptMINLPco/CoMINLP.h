@@ -22,6 +22,7 @@
 
 #include "CapeMINLPModel.h"                     // ICapeMINLPModel（capeopen_core）
 #include "backend/com/CapeOpenComInterfaces.h"  // ICapeMINLP（capeopen_core）
+#include "xOptMINLPcoClsid.h"                   // 显示名/描述常量（与注册表共用）
 
 class CoMINLP : public ICapeMINLP, public ICapeIdentification {
   public:
@@ -84,8 +85,10 @@ class CoMINLP : public ICapeMINLP, public ICapeIdentification {
     ICapeMINLPModel* model_ = nullptr;            // 当前委托目标
     std::unique_ptr<ICapeMINLPModel> owned_;      // 生产模式下拥有
     std::string init_error_;
-    std::wstring comp_name_ = L"xOpt MINLP";
-    std::wstring comp_desc_ = L"xOpt problem published as CAPE-OPEN MINLP";
+    // 与注册表 CapeDescription 共用常量，见 xOptMINLPcoClsid.h——
+    // PME 列表里看到的与 CoCreateInstance 后问出来的必须一致。
+    std::wstring comp_name_ = XOPTMINLPCO_NAME;
+    std::wstring comp_desc_ = XOPTMINLPCO_FRIENDLY;
 };
 
 #endif  // _WIN32

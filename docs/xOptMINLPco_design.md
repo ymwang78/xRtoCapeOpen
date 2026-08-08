@@ -70,7 +70,7 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - [x] **回环测试**（`tests/test_xoptminlpco_com.cpp`）：mock → adapter → `CoMINLP`(打包 VARIANT)
     → capeopen_core `CapeMINLPModelCom`(注入, 解包) → 对拍。**1/1 通过**（adapter 4/4，共 5/5）。
   - [x] `ICapeIdentification` 已于 N3 落地（COM）、§6.3 步骤 3 落地（CORBA）。
-  - [ ] MINLP CATID 注册 → issue #5。
+  - [x] CAPE-OPEN 组件类别注册（issue #5，2026-08）——见 §6.7。
   - 构建注记：DLL 导入库改名 `xOptMINLPco_import.lib` 避免与静态库 `xoptminlpco.lib` 大小写冲突
     （LNK1149）；`<olectl.h>` 提供 `SELFREG_E_CLASS`；本机构建用 `-DVCPKG_APPLOCAL_DEPS=OFF`（applocal 缺 dumpbin）。
 - **N3 — COM 注册 + 激活冒烟**  ✅ 已落地（2026-06）
@@ -84,7 +84,9 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `CoMINLP()`（经 `XRTO_XOPT_PROBLEM_DLL` 加载 mock DLL）→ 驱动 `ICapeMINLP`(obj=25) +
     `ICapeIdentification` → 注销。**1/1 通过**（注册失败则 GTEST_SKIP）。验证注入未覆盖的整条
     激活/类厂/生产 ctor/跨 DLL 加载路径。
-  - [ ] 待办：真正独立进程的 COM 客户端 exe → issue #4；MINLP CATID 注册（PME 发现）→ issue #5。
+    2026-08 起同时断言**按 CAPE-OPEN 类别枚举能找到本组件**（`EnumClassesOfCategories`，
+    即 PME 的发现路径），并断言注销后枚举不到——见 §6.7。
+  - [ ] 待办：真正独立进程的 COM 客户端 exe → issue #4。
 - **N4 — CORBA 前端**  ✅ 已落地（2026-06）
   - [x] `xOptMINLPco/MINLPServant.{h,cpp}`：POA 实现 `ICapeMINLP` 委托 `ICapeMINLPModel`
     （生产 ctor 读 `XRTO_XOPT_PROBLEM_DLL`；注入 ctor 供测试），复用 `CapeCorbaMarshal`。
@@ -127,7 +129,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     3 文件 + capeopen_core 的 `CapeMINLPModelCom.cpp`/`CapeVariantMarshal.cpp`（官方 IID + VARIANT marshaling）。
     msbuild Release|x64 验证导出 4 个 COM 入口。CORBA 前端因需环境相关的 TAO 路径，仍由 CMake 构建。
   - [x] 独立进程 CORBA server（IOR）已落地，见上方 N4（2026-08）。
-  - [ ] 待办：MINLP CATID 注册 → issue #5；正式 install 规则（尚未开 issue）。
+  - [x] CAPE-OPEN 组件类别注册（issue #5）——见 §6.7。
+  - [ ] 待办：正式 install 规则（尚未开 issue）。
 
 ## 5. 风险
 
@@ -360,6 +363,7 @@ are numbered starting from 1」写在接口规范里、**与绑定无关**，所
 | ~~COM 绑定仍 0-based~~ | ✅ 已修 | §6.5（issue #2） |
 | 能力上是 NLP-only，非完整 MINLP | 🟡 需明示 | §6.4 |
 | 未经第三方 ORB 实测 | 🟡 未验证 | 步骤 4，目前所有验证两端都是我们的代码 |
+| 无 MINLP 专用组件类别 | 🟡 规范所限 | §6.7——规范里就没有，已注册通用类别；非我方缺失 |
 
 **为什么异常体风险从「理论」升级成了「活跃」**：这一条最初记录时，我们从不抛这些用户异常
 （越界抛 `BAD_PARAM`、模型失败抛 `INTERNAL`，都是系统异常），所以「重建的成员布局不对也没人
@@ -374,6 +378,44 @@ are numbered starting from 1」写在接口规范里、**与绑定无关**，所
 修复只能等官方 `CAPE-OPENv1-0-0.idl`：在没有它的情况下继续猜成员只会增加分歧面，不会降低风险。
 在那之前，**错误路径上的 marshalling 失败应先按这一条排查**。同样的说明也写在
 `CAPEOPEN100_Minlp.idl` 文件头「已知偏差 1」里——那才是第三方会读到的地方。
+
+### 6.7 组件类别注册（issue #5）：**规范里没有 MINLP 类别**
+
+PME 靠枚举 CAPE-OPEN 组件类别来发现可用组件。没有类别注册，用户在 PME 的组件列表里看不到
+这个组件，只能手工填 CLSID/ProgID——对最终用户等于不可用。
+
+**调研结论（这条比代码本身更值得记）**：`docs/` 下 1.0 与 1.1 两套文档全文扫描后确认，
+CAPE-OPEN 的组件类别只有一张表，在 `Methods&Tools_Integrated_Guidelines.pdf`
+Figure 14「GUIDs for CAPE-OPEN Component categories」（p.47），共 6 项：
+
+| 类别 | CATID |
+|------|-------|
+| CAPE-OPEN Component | `{678c09a1-7d66-11D2-a67d-00105a42887f}` |
+| CAPE-OPEN Thermo Routine | `{678c09a2-…}` |
+| CAPE-OPEN Thermo Property System | `{678c09a3-…}` |
+| CAPE-OPEN Thermo Property Package | `{678c09a4-…}` |
+| CAPE-OPEN Unit Operation | `{678c09a5-…}` |
+| CAPE-OPEN Thermo Equilibrium Server | `{678c09a6-…}` |
+
+**没有 MINLP / Solvers / Numerics 类别**，Optimisation 规范本身也未定义任何类别。
+（GUID 家族与接口 IID 同源：`678C09CC` 是 `ICapeMINLP`，`678C0990` 是 `ICapeIdentification`。）
+
+于是**只注册通用的「CAPE-OPEN Component」**，不臆造 MINLP 专用 GUID——编一个出来没有任何
+PME 会去找它，还可能与将来 CO-LaN 真定的那个撞号。较新的规范确实会各自定义 CATID
+（如 Monitoring 用 `{7BA1AF89-B2E4-493d-BD80-2970BF4CBE99}`，与 `678c09ax` 不同族），
+所以若 CO-LaN 后来为 MINLP 定过一个，应在 `xOptMINLPcoClsid.h` 补上——属 issue #3 的范围。
+
+实现要点：
+
+- **直接写注册表键而非用 `ICatRegister`**。`RegisterClassImplCategories` 只往 HKCR（实为
+  HKLM）写、需要管理员；而本组件其余部分刻意注册在 `HKCU\Software\Classes` 以便免管理员
+  安装。混用会得到「类在 HKCU、类别在 HKLM」的半吊子状态，卸载还清不干净。
+  写入的键与文档 Figure 13 的 .reg 示例逐字一致。
+- 同时写 `CapeDescription` 子键（Name/Description/CapeVersion/ComponentVersion/About），
+  PME 用它展示组件信息，出处同为 Figure 13。
+- 测试断言的**不是「注册表里有那个键」，而是按类别枚举能不能找到本组件**
+  （`ICatInformation::EnumClassesOfCategories`）——那才是 PME 实际走的路；
+  并断言注销后枚举不到，避免留下指向已卸载组件的陈旧条目。已反向验证。
 
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。
