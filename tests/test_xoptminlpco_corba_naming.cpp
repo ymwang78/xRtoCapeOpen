@@ -62,6 +62,14 @@ std::string exeDir() {
 // vcpkg 三元组目录由 CMake 以 -D 传进来（naming service 在 <triplet>/tools/ace/）。
 std::string namingServiceExe() { return std::string(XRTO_TAO_TOOLS_DIR) + "\\tao_cosnaming.exe"; }
 
+// GenerateConsoleCtrlEvent 只能打给与调用方共用控制台的进程。CI 里测试进程常常
+// 根本没有控制台（被服务或无窗口的 runner 拉起），那样滚动重启用例只能 SKIP——
+// 比静默假绿好，但等于这条保护在 CI 上不生效。没有就自己开一个，让覆盖稳定下来。
+void ensureConsole() {
+    if (GetConsoleWindow() != nullptr) return;
+    AllocConsole();
+}
+
 class Proc {
   public:
     Proc() = default;
@@ -226,7 +234,9 @@ TEST(XOptMINLPcoCorbaNaming, ShutdownKeepsAReplacementsBinding) {
                init_ref;
     };
 
-    // A 要能优雅停机（解绑逻辑在那条路径上），故给它自己的进程组
+    // A 要能优雅停机（解绑逻辑在那条路径上），故给它自己的进程组；
+    // 并确保本进程有控制台，否则 CTRL_BREAK 送不到、这条只能 SKIP。
+    ensureConsole();
     Proc a;
     ASSERT_TRUE(a.start(serverCmd(ior_a), /*own_group*/ true));
     ASSERT_FALSE(waitForFile(ior_a, "IOR:", a, std::chrono::seconds(30), err).empty()) << err;
@@ -242,7 +252,7 @@ TEST(XOptMINLPcoCorbaNaming, ShutdownKeepsAReplacementsBinding) {
         a.stop();
         b.stop();
         ns.stop();
-        GTEST_SKIP() << "触发不了 A 的优雅停机（CTRL_BREAK 未送达），"
+        GTEST_SKIP() << "触发不了 A 的优雅停机（CTRL_BREAK 未送达，连 AllocConsole 也没救回来），"
                         "本用例无法验证解绑的所有权判断——不做无效断言";
     }
 

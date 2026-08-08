@@ -177,7 +177,7 @@ public:
 | `com:{CLSID-GUID}` 或 `com:Prog.Id.1` | COM | `CoCreateInstance` / ProgID→CLSID |
 | `C:\path\to\unit.dll` | COM | `.dll` 默认走 COM（`DllGetClassObject` 或导出工厂） |
 | `corba:IOR:0100...` | CORBA | `ORB::string_to_object(IOR)` |
-| `corba:corbaname::host:port/Name` | CORBA | 经 Naming Service 解析 |
+| `corba:corbaname::host:port#Name` | CORBA | 经 Naming Service 解析（分隔符是 `#`，不是 `/`） |
 | `mock:problemName` | Mock | 内置测试模型 |
 
 `CapeBackendFactory::create(const std::string& conn) -> std::unique_ptr<ICapeMINLPModel>`：
