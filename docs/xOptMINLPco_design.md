@@ -115,8 +115,8 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     `windows.h` 默认拉 `winsock.h`(v1)，顺序反了会炸出 `IPPROTO_IPV6`/`timeval` 一片重定义。
   - server 的控制台输出一律 ASCII：源码是 UTF-8 而 Windows 控制台默认 GBK，中文会乱码——
     这个 exe 正是拿去给第三方演示的。
-  - [ ] 待办：Naming Service 绑定（`corbaname:`）→ issue #6。需另跑 naming 进程才有意义、
-    也才测得了，故与本次分开。IOR 这条路不依赖任何外部服务。
+  - [x] **Naming Service 绑定**（`--name`，issue #6，2026-08）——见 §6.8。
+    IOR 那条路仍不依赖任何外部服务；`--name` 才需要另跑 naming 进程。
 - **N5 — C-ABI 输入 + 打包**  ✅ 已落地（2026-06）
   - [x] `XOptMINLPAdapter` 重构为内部 `IXOptProblemView` 抽象 + 两实现：`CppProblemView`(xOptProblem*)
     / `CapiProblemView`(xOptProblemT vtable，int&↔int* 转换)。`connect()` 自动探测 DLL 导出
@@ -416,6 +416,43 @@ PME 会去找它，还可能与将来 CO-LaN 真定的那个撞号。较新的�
 - 测试断言的**不是「注册表里有那个键」，而是按类别枚举能不能找到本组件**
   （`ICatInformation::EnumClassesOfCategories`）——那才是 PME 实际走的路；
   并断言注销后枚举不到，避免留下指向已卸载组件的陈旧条目。已反向验证。
+
+### 6.8 Naming Service 绑定（issue #6）
+
+IOR 是一长串十六进制，只能靠文件或剪贴板传。实际部署里 PME 更常用可读的名字，且服务端重启后
+同一个名字还能解析到新引用。`xOptMINLPcoCorbaServer --name <路径>` 现在会把引用绑进 Naming
+Service，客户端用 `corba:corbaname::host:port#<名字>` 连接。
+
+消费端**早就支持**了——`CapeMINLPModelCorba::connect()` 走的是 `string_to_object(target)`，
+`corbaname:` 由 ORB 解析。缺的一直是服务端的 bind。
+
+几个刻意的选择：
+
+- **`rebind` 而非 `bind`**。服务端重启时名字多半还在，`bind` 会抛 `AlreadyBound`，于是
+  「重启一次就再也绑不上」——运维最不想要的失败方式。`rebind` 覆盖旧的那个（多半指向已死进程）。
+- **绑定在宣布 serving 之前，也在写 IOR 文件之前**。IOR 文件是外界唯一能轮询的就绪信号
+  （两条跨进程测试都拿它当就绪）；先落盘再绑，观察者看到文件就认为可用，而名字还没绑好。
+  更糟的是绑定若最终失败，进程会退出，而那份「就绪」文件已经发出去了。
+- **解绑在停服之前，且只解绑仍属于自己的那个名字**。停服在前的话，名字还在、ORB 已不收请求，
+  客户端拿到引用要到第一次调用才失败，比「名字不存在」难查得多。
+  而「只解绑自己的」是因为滚动重启：新实例先 `rebind` 抢走名字，旧实例随后停机，无条件 `unbind`
+  删掉的是**新实例**那份活的注册，两个都解析不到且悄无声息。判据用 `_is_equivalent`——
+  规范说它返回 true 即确定等价、false 只表示「不确定」，失败方向正好安全。
+
+  > 残留：`resolve` 与 `unbind` 之间仍有极窄的 TOCTOU——判定「仍是自己」之后、真正 unbind 之前，
+  > 若恰好被 `rebind` 抢走，仍会误删。CosNaming 没有原子的「比对后解绑」，消不掉。
+  > **仍然保留 unbind**，因为另一条路（干脆不解绑、等下次 rebind 覆盖）是拿一个罕见竞态
+  > 换一个必然后果：没有后继实例的正常停机会永久留下一个指向死进程的名字，
+  > 而那正是上面要避免的那种「拿到引用、第一次调用才失败」。
+- 名字按 `/` 拆成多级 `CosNaming::Name`，中间各级 `bind_new_context`（`AlreadyBound` 则 resolve）。
+
+测试（`tests/test_xoptminlpco_corba_naming.cpp`）真起一个 `tao_cosnaming.exe`，再起 server
+`--name`，然后**经名字**连回来驱动对拍。已反向验证：去掉 server 的绑定调用后，
+客户端 `_narrow` 失败。
+
+naming 起在固定端口上，因为客户端这一侧没法传 `-ORBInitRef`——消费端调的是
+`ORB_init(0, nullptr)`。固定端口后 `corbaname::host:port#name` 自带地址，不依赖客户端 ORB 的
+初始引用配置。
 
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。
