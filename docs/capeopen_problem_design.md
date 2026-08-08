@@ -470,7 +470,9 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
   defines `WIN32 ACE_AS_STATIC_LIBS TAO_AS_STATIC_LIBS`；libs `TAO_PortableServers TAO_AnyTypeCodes
   TAOs ACEs ws2_32 mswsock advapi32 user32 iphlpapi`。
 - [x] production `string_to_object(IOR)` 跨进程冒烟已落地（`tests/test_xoptminlpco_corba_ipc.cpp`）。
-- [ ] 待办：`corbaname:` → issue #6；第三方 ORB 实证 → issue #4；跨后端一致性测试
+- [x] `corbaname:` 端到端已落地（issue #6，`tests/test_xoptminlpco_corba_naming.cpp` 真起一个
+  naming 进程）。消费端本来就支持——`string_to_object` 认 `corbaname:`——缺的是服务端 bind。
+- [ ] 待办：第三方 ORB 实证 → issue #4；跨后端一致性测试
   （同一问题经 COM 与 CORBA 输出相等）——issue #2 已修，两个绑定的线上索引基现已一致，
   这条因此变得有意义了；`option(CAPEOPEN_SINGLE_DLL)` 合编。
 

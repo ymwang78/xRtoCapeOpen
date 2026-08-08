@@ -67,7 +67,9 @@ if(WITH_XOPTMINLPCO_CORBA)
     # 独立进程 CORBA server：CORBA 没有 COM 那样的进程内激活，外部 ORB 只能
     # 经 IIOP 连到一个真在跑 ORB 的进程，所以这里必须是 exe 而不是 DLL。
     add_executable(xOptMINLPcoCorbaServer MINLPCorbaServer.cpp)
-    target_link_libraries(xOptMINLPcoCorbaServer PRIVATE xoptminlpco_corba)
+    # --name 走 Naming Service（issue #6）：需要 orbsvcs 的 CosNaming stub。
+    # 头文件在 <triplet>/include/orbsvcs/，故 include 根仍是 TAO_INCLUDE_DIR。
+    target_link_libraries(xOptMINLPcoCorbaServer PRIVATE xoptminlpco_corba TAO_CosNamings)
 endif()
 
 # ---- 单元测试 ----
@@ -154,5 +156,18 @@ if(XOPTMINLPCO_BUILD_TESTS)
         target_link_libraries(test_xoptminlpco_corba_ipc PRIVATE capeopen_corba GTest::gtest)
         add_dependencies(test_xoptminlpco_corba_ipc xOptMINLPcoCorbaServer mock_xoptproblem)
         add_test(NAME XOptMINLPcoCorbaIpcTest COMMAND test_xoptminlpco_corba_ipc)
+
+        # Naming Service 端到端（issue #6）：起 tao_cosnaming → server --name →
+        # 客户端经 corbaname: 解析名字连回来。与上面的 IOR 直连用例互补——
+        # 「名字能被解析到」是 --name 唯一真正的产出，只有真跑一次 naming 才知道。
+        add_executable(test_xoptminlpco_corba_naming
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_corba_naming.cpp
+        )
+        target_link_libraries(test_xoptminlpco_corba_naming PRIVATE capeopen_corba GTest::gtest)
+        # naming service 可执行文件在 <triplet>/tools/ace/，测试要自己拉起它。
+        target_compile_definitions(test_xoptminlpco_corba_naming PRIVATE
+            XRTO_TAO_TOOLS_DIR="${TAO_TRIPLET_DIR}/tools/ace")
+        add_dependencies(test_xoptminlpco_corba_naming xOptMINLPcoCorbaServer mock_xoptproblem)
+        add_test(NAME XOptMINLPcoCorbaNamingTest COMMAND test_xoptminlpco_corba_naming)
     endif()
 endif()

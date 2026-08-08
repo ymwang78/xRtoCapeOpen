@@ -1,0 +1,193 @@
+﻿// ***************************************************************
+//  test_xoptminlpco_corba_naming   version:  1.0   -  date:  2026/08/08
+//  -------------------------------------------------------------
+//  This file is a part of project xRtoCapeOpen (xOptMINLPco).
+//  Copyright (C) 2026 - All Rights Reserved
+// ***************************************************************
+//  Naming Service 端到端冒烟（issue #6）：
+//
+//    [naming 进程]  tao_cosnaming.exe -o <ior>
+//    [server 进程]  xOptMINLPcoCorbaServer --name <名字>
+//                     -ORBInitRef NameService=file://<ior>
+//    [本进程]       CapeBackendFactory("corba:corbaname:...#<名字>")
+//                     → string_to_object 解析名字 → _narrow → 驱动对拍
+//
+//  与 test_xoptminlpco_corba_ipc.cpp 的区别只有一处：那条用 IOR 直连，这条经名字
+//  解析。之所以要单独一条，是因为「名字能被解析到」是 --name 唯一真正的产出——
+//  绑定代码写没写对，只有真跑一次 naming 才知道。
+//
+//  naming 起在**固定端口**上：客户端这一侧没法传 -ORBInitRef，因为消费端
+//  CapeMINLPModelCorba::connect() 调的是 ORB_init(0, nullptr)。固定端口后
+//  corbaname::host:port#name 自带地址，不依赖客户端 ORB 的初始引用配置。
+//
+//  自带 main。
+// ***************************************************************
+// ACE/TAO 必须最先包含（winsock2 先于 windows.h），理由见 test_..._corba_ipc.cpp。
+#include "backend/corba/CapeMINLPModelCorba.h"
+
+#include "CapeBackendFactory.h"
+
+#include <gtest/gtest.h>
+
+#ifdef _WIN32
+#    include <windows.h>
+#endif
+
+#include <chrono>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+void CapeRegisterCorbaBackend();  // backend/corba/CapeRegisterCorbaBackend.cpp
+
+// 进程拉起只有 Win32 实现；CMake 在非 WIN32 上不会注册本用例（CORBA 开关强制 OFF），
+// 但那个前提隔着一个文件，写在这里让将来在 POSIX 上开 CORBA 时得到编译期错误。
+#ifndef _WIN32
+#    error "test_xoptminlpco_corba_naming needs a POSIX spawn/kill path before it can run here"
+#endif
+
+namespace {
+
+std::string exeDir() {
+    char buf[MAX_PATH] = {0};
+    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    const std::string p(buf, n);
+    const size_t slash = p.find_last_of("\\/");
+    return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
+}
+
+// vcpkg 三元组目录由 CMake 以 -D 传进来（naming service 在 <triplet>/tools/ace/）。
+std::string namingServiceExe() { return std::string(XRTO_TAO_TOOLS_DIR) + "\\tao_cosnaming.exe"; }
+
+class Proc {
+  public:
+    Proc() = default;
+    ~Proc() { stop(); }
+
+    bool start(const std::string& cmdline) {
+        std::string line = cmdline;
+        STARTUPINFOA si{};
+        si.cb = sizeof(si);
+        started_ = CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                                  nullptr, nullptr, &si, &pi_) != 0;
+        return started_;
+    }
+    void stop() {
+        if (!started_) return;
+        TerminateProcess(pi_.hProcess, 0);
+        WaitForSingleObject(pi_.hProcess, 5000);
+        CloseHandle(pi_.hThread);
+        CloseHandle(pi_.hProcess);
+        started_ = false;
+    }
+    bool alive() const {
+        if (!started_) return false;
+        DWORD code = 0;
+        return GetExitCodeProcess(pi_.hProcess, &code) && code == STILL_ACTIVE;
+    }
+    DWORD exitCode() const {
+        DWORD code = 0;
+        GetExitCodeProcess(pi_.hProcess, &code);
+        return code;
+    }
+
+  private:
+    bool started_ = false;
+    PROCESS_INFORMATION pi_{};
+};
+
+// 轮询文件出现且内容以 prefix 开头；进程中途死掉就立即失败（带退出码），
+// 不干等到超时——「naming 退出码 N」远比「30 秒超时」好定位。
+std::string waitForFile(const std::string& path, const char* prefix, const Proc& p,
+                        std::chrono::seconds timeout, std::string& error_out) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!p.alive()) {
+            error_out = "进程提前退出, 退出码 " + std::to_string(p.exitCode());
+            return {};
+        }
+        std::ifstream in(path, std::ios::binary);
+        if (in) {
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            const std::string s = ss.str();
+            if (s.rfind(prefix, 0) == 0) return s;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    error_out = "等待超时: " + path;
+    return {};
+}
+
+TEST(XOptMINLPcoCorbaNaming, ResolvesThroughTheNamingService) {
+    const std::string dir = exeDir();
+    const std::string ns_ior = dir + "\\ns.ior";
+    const std::string srv_ior = dir + "\\named.ior";
+    const std::string name = "xOpt/MINLP";
+    // 固定端口：客户端这一侧没法传 -ORBInitRef（消费端调的是 ORB_init(0, nullptr)），
+    // 所以让 corbaname::host:port#name 自带地址，不依赖客户端 ORB 的初始引用配置。
+    const std::string ns_addr = "localhost:24567";
+    std::remove(ns_ior.c_str());
+    std::remove(srv_ior.c_str());
+
+    // 1) naming service
+    Proc ns;
+    ASSERT_TRUE(ns.start("\"" + namingServiceExe() + "\" -ORBEndpoint iiop://" + ns_addr +
+                         " -o \"" + ns_ior + "\""))
+        << "起不来 naming service: " << namingServiceExe();
+    std::string err;
+    const std::string ns_ref = waitForFile(ns_ior, "IOR:", ns, std::chrono::seconds(30), err);
+    ASSERT_FALSE(ns_ref.empty()) << err;
+
+    // 2) server，绑进 naming
+    Proc srv;
+    const std::string cmd = "\"" + dir + "\\xOptMINLPcoCorbaServer.exe\"" +
+                            " --problem-dll \"" + dir + "\\mock_xoptproblem.dll\"" +
+                            " --ior-file \"" + srv_ior + "\"" +
+                            " --name " + name +
+                            " -ORBInitRef NameService=corbaloc:iiop:" + ns_addr + "/NameService";
+    ASSERT_TRUE(srv.start(cmd)) << "起不来 server";
+    ASSERT_FALSE(waitForFile(srv_ior, "IOR:", srv, std::chrono::seconds(30), err).empty()) << err;
+
+    // 3) 经**名字**连回来——本用例的全部意义在这一步。
+    //    corbaname 的 URL 形式：corbaname:<addr>#<名字>
+    CapeRegisterCorbaBackend();
+    const std::string target = "corba:corbaname::" + ns_addr + "#" + name;
+
+    std::string ferr;
+    std::unique_ptr<ICapeMINLPModel> consumer = CapeBackendFactory::instance().create(target, ferr);
+    ASSERT_NE(consumer, nullptr) << ferr;
+    ASSERT_EQ(consumer->connect(), 0) << consumer->lastError();
+
+    CapeMINLPSize s;
+    ASSERT_EQ(consumer->getSize(s), 0) << consumer->lastError();
+    EXPECT_EQ(s.num_variables, 2);
+    EXPECT_EQ(s.num_constraints, 1);
+
+    std::vector<std::string> names;
+    ASSERT_EQ(consumer->getVariableNames({0, 1}, names), 0) << consumer->lastError();
+    EXPECT_EQ(names, (std::vector<std::string>{"x0", "x1"}));
+
+    ASSERT_EQ(consumer->setVariableValues({0, 1}, {3.0, 4.0}), 0) << consumer->lastError();
+    double obj = 0;
+    ASSERT_EQ(consumer->getObjectiveValue(obj), 0) << consumer->lastError();
+    EXPECT_DOUBLE_EQ(obj, 25.0);
+
+    consumer->disconnect();
+    srv.stop();
+    ns.stop();
+    std::remove(ns_ior.c_str());
+    std::remove(srv_ior.c_str());
+}
+
+}  // namespace
+
+#ifndef USE_GTEST_MAIN
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}
+#endif

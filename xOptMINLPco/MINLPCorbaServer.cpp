@@ -25,13 +25,15 @@
 //  IOR 同时打到 stdout 和 --ior-file。文件写入是原子的（先写 .tmp 再改名），
 //  否则轮询这个文件的客户端会读到半截 IOR。
 //
-//  注：Naming Service 绑定（corbaname:）尚未做——它要求另跑一个 naming 进程
-//  才有意义、也才测得了，故与本次分开。IOR 这条路不依赖任何外部服务。
+//  --name 另把引用绑进 Naming Service，客户端即可用可读的
+//  corbaname::host:port/<名字> 连接（issue #6）。IOR 那条路不依赖任何外部服务，
+//  --name 则要求另跑一个 naming 进程。
 // ***************************************************************
 // ACE/TAO 必须最先包含：它拉 winsock2.h，而 <windows.h> 默认拉 winsock.h(v1)，
 // 顺序反了会炸出 IPPROTO_IPV6/timeval 一片重定义。
 #include <tao/ORB.h>
 #include <tao/PortableServer/PortableServer.h>
+#include <orbsvcs/CosNamingC.h>  // --name：把引用绑进 Naming Service
 
 #ifdef _WIN32
 #    include <windows.h>  // MoveFileExA
@@ -80,11 +82,14 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
 // 控制台输出一律 ASCII：本 exe 是拿去给第三方演示的，源码是 UTF-8，而 Windows
 // 控制台默认 GBK 代码页——中文在那里会变成乱码，正好毁掉演示。注释仍用中文。
 void usage(const char* argv0) {
-    std::cerr << "Usage: " << argv0 << " --problem-dll <path> [--ior-file <path>] [-ORB<...>]\n"
+    std::cerr << "Usage: " << argv0
+              << " --problem-dll <path> [--ior-file <path>] [--name <path>] [-ORB<...>]\n"
               << "  --problem-dll <path>  xOptProblem DLL to wrap"
               << " (or set env XRTO_XOPT_PROBLEM_DLL)\n"
               << "  --ior-file <path>     write the IOR to this file (atomically);"
               << " stdout only if omitted\n"
+              << "  --name <path>         also bind into the Naming Service, '/'-separated;\n"
+              << "                        needs -ORBInitRef NameService=corbaloc:iiop:host:port/NameService\n"
               << "  -ORB* args (e.g. -ORBEndpoint iiop://host:port) are consumed by ORB_init\n";
 }
 
@@ -94,6 +99,84 @@ void setProblemDllEnv(const std::string& path) {
 #else
     setenv("XRTO_XOPT_PROBLEM_DLL", path.c_str(), 1);
 #endif
+}
+
+// —— Naming Service（--name，issue #6）——
+//
+// 名字按 '/' 拆成多级 CosNaming::Name，中间各级用 bind_new_context 建出来
+// （已存在则忽略 AlreadyBound），最后一级 rebind 绑对象引用。
+//
+// 用 rebind 而不是 bind：服务端重启时名字多半还在，bind 会抛 AlreadyBound，
+// 于是「重启一次就再也绑不上」——这正是运维最不想要的失败方式。
+// rebind 覆盖旧的那个（多半指向已死进程）。
+CosNaming::Name toName(const std::string& path) {
+    CosNaming::Name n;
+    size_t start = 0;
+    while (start <= path.size()) {
+        const size_t slash = path.find('/', start);
+        const std::string part =
+            (slash == std::string::npos) ? path.substr(start) : path.substr(start, slash - start);
+        if (!part.empty()) {
+            n.length(n.length() + 1);
+            n[n.length() - 1].id = CORBA::string_dup(part.c_str());
+            n[n.length() - 1].kind = CORBA::string_dup("");
+        }
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+    return n;
+}
+
+CosNaming::NamingContext_ptr resolveNaming(CORBA::ORB_ptr orb) {
+    CORBA::Object_var obj = orb->resolve_initial_references("NameService");
+    return CosNaming::NamingContext::_narrow(obj.in());
+}
+
+bool bindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ref) {
+    CosNaming::NamingContext_var root = resolveNaming(orb);
+    if (CORBA::is_nil(root.in())) {
+        std::cerr << "cannot resolve NameService"
+                  << " (pass -ORBInitRef NameService=corbaloc:iiop:host:port/NameService)\n";
+        return false;
+    }
+    const CosNaming::Name name = toName(path);
+    if (name.length() == 0) {
+        std::cerr << "--name is empty\n";
+        return false;
+    }
+    // 逐级建上下文，最后一级留给 rebind
+    CosNaming::NamingContext_var ctx = CosNaming::NamingContext::_duplicate(root.in());
+    for (CORBA::ULong i = 0; i + 1 < name.length(); ++i) {
+        CosNaming::Name one;
+        one.length(1);
+        one[0] = name[i];
+        try {
+            CosNaming::NamingContext_var sub = ctx->bind_new_context(one);
+            ctx = sub._retn();
+        } catch (const CosNaming::NamingContext::AlreadyBound&) {
+            CORBA::Object_var o = ctx->resolve(one);
+            CosNaming::NamingContext_var sub = CosNaming::NamingContext::_narrow(o.in());
+            if (CORBA::is_nil(sub.in())) return false;
+            ctx = sub._retn();
+        }
+    }
+    CosNaming::Name last;
+    last.length(1);
+    last[0] = name[name.length() - 1];
+    ctx->rebind(last, ref);
+    return true;
+}
+
+void unbindName(CORBA::ORB_ptr orb, const std::string& path) {
+    // 退出时解绑，免得留下一个指向已死进程的名字——下一个客户端解析到它，
+    // 拿到的引用会在第一次调用时才失败，比「名字不存在」难查得多。
+    try {
+        CosNaming::NamingContext_var root = resolveNaming(orb);
+        if (CORBA::is_nil(root.in())) return;
+        root->unbind(toName(path));
+    } catch (const CORBA::Exception&) {
+        // 停机路径上尽力而为：naming 可能已经先于我们退出。
+    }
 }
 
 // 原子发布：先写临时文件再改名，读者要么看到旧内容要么看到完整新内容，
@@ -131,6 +214,7 @@ bool writeIorFileAtomically(const std::string& path, const char* ior) {
 int main(int argc, char** argv) {
     std::string problem_dll;
     std::string ior_file;
+    std::string bind_path;
 
     try {
         // ORB_init 先跑：它会就地摘掉 -ORB* 参数，剩下的才轮到我们解析。
@@ -142,6 +226,8 @@ int main(int argc, char** argv) {
                 problem_dll = argv[++i];
             } else if (a == "--ior-file" && i + 1 < argc) {
                 ior_file = argv[++i];
+            } else if (a == "--name" && i + 1 < argc) {
+                bind_path = argv[++i];
             } else if (a == "--help" || a == "-h") {
                 usage(argv[0]);
                 return 0;
@@ -180,10 +266,18 @@ int main(int argc, char** argv) {
             return 5;
         }
 
+        // Naming Service 绑定要在宣布 serving 之前完成：先说 serving 再绑，
+        // 中间那一小段里客户端解析名字会失败，而日志已经说「好了」。
+        if (!bind_path.empty() && !bindName(orb.in(), bind_path, ref.in())) {
+            std::cerr << "failed to bind into the Naming Service: " << bind_path << "\n";
+            return 7;
+        }
+
         // stdout 只放 IOR 本身，方便 `server --ior-file x` 之外直接管道取用。
         std::cout << ior.in() << std::endl;
         std::cerr << "xOptMINLPcoCorbaServer: ICapeMINLP published, serving"
-                  << (ior_file.empty() ? "" : (" (IOR written to " + ior_file + ")")) << "\n";
+                  << (ior_file.empty() ? "" : (" (IOR written to " + ior_file + ")"))
+                  << (bind_path.empty() ? "" : (" (bound as " + bind_path + ")")) << "\n";
 
         std::signal(SIGINT, onSignal);
         std::signal(SIGTERM, onSignal);
@@ -202,6 +296,9 @@ int main(int argc, char** argv) {
         // 顺序要紧：deactivate_object 必须在 shutdown 之前。反过来的话 POA 已经
         // 不再受理操作，deactivate_object 抛 BAD_INV_ORDER——实测如此。
         std::cerr << "xOptMINLPcoCorbaServer: shutting down\n";
+        // 先解绑再停服：反过来的话，名字会在 ORB 已经不收请求之后仍短暂可解析，
+        // 客户端拿到引用、第一次调用才失败，比「名字不存在」难查得多。
+        if (!bind_path.empty()) unbindName(orb.in(), bind_path);
         poa->deactivate_object(oid.in());
         orb->shutdown(/*wait_for_completion*/ false);
         orb->destroy();
