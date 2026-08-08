@@ -26,8 +26,8 @@
 //  否则轮询这个文件的客户端会读到半截 IOR。
 //
 //  --name 另把引用绑进 Naming Service，客户端即可用可读的
-//  corbaname::host:port/<名字> 连接（issue #6）。IOR 那条路不依赖任何外部服务，
-//  --name 则要求另跑一个 naming 进程。
+//  corbaname::host:port#<名字> 连接（issue #6）——分隔符是 '#'，不是 '/'。
+//  IOR 那条路不依赖任何外部服务，--name 则要求另跑一个 naming 进程。
 // ***************************************************************
 // ACE/TAO 必须最先包含：它拉 winsock2.h，而 <windows.h> 默认拉 winsock.h(v1)，
 // 顺序反了会炸出 IPPROTO_IPV6/timeval 一片重定义。
@@ -88,7 +88,8 @@ void usage(const char* argv0) {
               << " (or set env XRTO_XOPT_PROBLEM_DLL)\n"
               << "  --ior-file <path>     write the IOR to this file (atomically);"
               << " stdout only if omitted\n"
-              << "  --name <path>         also bind into the Naming Service, '/'-separated;\n"
+              << "  --name <path>         also bind into the Naming Service; path is '/'-separated,\n"
+              << "                        clients then use corbaname::host:port#<path> ('#', not '/')\n"
               << "                        needs -ORBInitRef NameService=corbaloc:iiop:host:port/NameService\n"
               << "  -ORB* args (e.g. -ORBEndpoint iiop://host:port) are consumed by ORB_init\n";
 }
@@ -127,9 +128,17 @@ CosNaming::Name toName(const std::string& path) {
     return n;
 }
 
+// resolve_initial_references 会抛（NameService 没配时 ORB::InvalidName，
+// naming 连不上时 TRANSIENT）。这里吞掉换成 nil，是为了让调用方能给出那句
+// 有用的「pass -ORBInitRef ...」提示——放任它冒到 main 的通用 catch，
+// 用户看到的就只是一句 "CORBA exception: TRANSIENT"，等于没说。
 CosNaming::NamingContext_ptr resolveNaming(CORBA::ORB_ptr orb) {
-    CORBA::Object_var obj = orb->resolve_initial_references("NameService");
-    return CosNaming::NamingContext::_narrow(obj.in());
+    try {
+        CORBA::Object_var obj = orb->resolve_initial_references("NameService");
+        return CosNaming::NamingContext::_narrow(obj.in());
+    } catch (const CORBA::Exception&) {
+        return CosNaming::NamingContext::_nil();
+    }
 }
 
 bool bindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ref) {
@@ -144,36 +153,58 @@ bool bindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ref
         std::cerr << "--name is empty\n";
         return false;
     }
-    // 逐级建上下文，最后一级留给 rebind
-    CosNaming::NamingContext_var ctx = CosNaming::NamingContext::_duplicate(root.in());
-    for (CORBA::ULong i = 0; i + 1 < name.length(); ++i) {
-        CosNaming::Name one;
-        one.length(1);
-        one[0] = name[i];
-        try {
-            CosNaming::NamingContext_var sub = ctx->bind_new_context(one);
-            ctx = sub._retn();
-        } catch (const CosNaming::NamingContext::AlreadyBound&) {
-            CORBA::Object_var o = ctx->resolve(one);
-            CosNaming::NamingContext_var sub = CosNaming::NamingContext::_narrow(o.in());
-            if (CORBA::is_nil(sub.in())) return false;
-            ctx = sub._retn();
+    // rebind 等调用同样会抛（naming 中途挂掉就是 COMM_FAILURE）。在这里收口，
+    // 让 main 报出针对性的 exit 7 与名字，而不是笼统的 exit 6。
+    try {
+        // 逐级建上下文，最后一级留给 rebind
+        CosNaming::NamingContext_var ctx = CosNaming::NamingContext::_duplicate(root.in());
+        for (CORBA::ULong i = 0; i + 1 < name.length(); ++i) {
+            CosNaming::Name one;
+            one.length(1);
+            one[0] = name[i];
+            try {
+                CosNaming::NamingContext_var sub = ctx->bind_new_context(one);
+                ctx = sub._retn();
+            } catch (const CosNaming::NamingContext::AlreadyBound&) {
+                CORBA::Object_var o = ctx->resolve(one);
+                CosNaming::NamingContext_var sub = CosNaming::NamingContext::_narrow(o.in());
+                if (CORBA::is_nil(sub.in())) return false;
+                ctx = sub._retn();
+            }
         }
+        CosNaming::Name last;
+        last.length(1);
+        last[0] = name[name.length() - 1];
+        ctx->rebind(last, ref);
+        return true;
+    } catch (const CORBA::Exception& e) {
+        std::cerr << "Naming Service bind failed: " << e._name() << "\n";
+        return false;
     }
-    CosNaming::Name last;
-    last.length(1);
-    last[0] = name[name.length() - 1];
-    ctx->rebind(last, ref);
-    return true;
 }
 
-void unbindName(CORBA::ORB_ptr orb, const std::string& path) {
+void unbindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ours) {
     // 退出时解绑，免得留下一个指向已死进程的名字——下一个客户端解析到它，
     // 拿到的引用会在第一次调用时才失败，比「名字不存在」难查得多。
+    //
+    // **但只在这个名字还绑在我们自己身上时才解绑。** 滚动重启的时序是：
+    // 新实例先 rebind 抢走名字，旧实例随后停机——若旧实例无条件 unbind，
+    // 删掉的是**新实例**那份活的注册，于是两个都解析不到，且悄无声息。
+    //
+    // 判据用 _is_equivalent：按规范它返回 true 即确定等价，返回 false 只表示
+    // 「不确定」。方向正好是安全的——误判为「不是我们的」只会留下一条陈旧条目，
+    // 下次 rebind 就覆盖掉；反过来误删别人的才是灾难。
     try {
         CosNaming::NamingContext_var root = resolveNaming(orb);
         if (CORBA::is_nil(root.in())) return;
-        root->unbind(toName(path));
+        const CosNaming::Name name = toName(path);
+        CORBA::Object_var current = root->resolve(name);
+        if (CORBA::is_nil(current.in()) || !current->_is_equivalent(ours)) {
+            std::cerr << "xOptMINLPcoCorbaServer: " << path
+                      << " now points elsewhere, leaving it alone\n";
+            return;
+        }
+        root->unbind(name);
     } catch (const CORBA::Exception&) {
         // 停机路径上尽力而为：naming 可能已经先于我们退出。
     }
@@ -261,16 +292,20 @@ int main(int argc, char** argv) {
         CORBA::Object_var ref = poa->id_to_reference(oid.in());
         CORBA::String_var ior = orb->object_to_string(ref.in());
 
-        if (!ior_file.empty() && !writeIorFileAtomically(ior_file, ior.in())) {
-            std::cerr << "failed to write the IOR file: " << ior_file << "\n";
-            return 5;
-        }
-
-        // Naming Service 绑定要在宣布 serving 之前完成：先说 serving 再绑，
-        // 中间那一小段里客户端解析名字会失败，而日志已经说「好了」。
+        // 发布顺序：**先绑名字，再写 IOR 文件**。
+        //
+        // IOR 文件是外界唯一能轮询的就绪信号（本项目两条跨进程测试都拿它当就绪）。
+        // 若先落盘再绑，观察者看到文件就认为可用，而此刻名字还没绑好——解析必然失败；
+        // 更糟的是绑定若最终失败，进程会退出，而那份「就绪」文件已经发出去了。
+        // 反过来则没有这个窗口：文件出现时，两种发布方式都已经成立。
         if (!bind_path.empty() && !bindName(orb.in(), bind_path, ref.in())) {
             std::cerr << "failed to bind into the Naming Service: " << bind_path << "\n";
             return 7;
+        }
+
+        if (!ior_file.empty() && !writeIorFileAtomically(ior_file, ior.in())) {
+            std::cerr << "failed to write the IOR file: " << ior_file << "\n";
+            return 5;
         }
 
         // stdout 只放 IOR 本身，方便 `server --ior-file x` 之外直接管道取用。
@@ -298,7 +333,7 @@ int main(int argc, char** argv) {
         std::cerr << "xOptMINLPcoCorbaServer: shutting down\n";
         // 先解绑再停服：反过来的话，名字会在 ORB 已经不收请求之后仍短暂可解析，
         // 客户端拿到引用、第一次调用才失败，比「名字不存在」难查得多。
-        if (!bind_path.empty()) unbindName(orb.in(), bind_path);
+        if (!bind_path.empty()) unbindName(orb.in(), bind_path, ref.in());
         poa->deactivate_object(oid.in());
         orb->shutdown(/*wait_for_completion*/ false);
         orb->destroy();

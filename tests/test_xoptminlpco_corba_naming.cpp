@@ -8,7 +8,7 @@
 //
 //    [naming 进程]  tao_cosnaming.exe -o <ior>
 //    [server 进程]  xOptMINLPcoCorbaServer --name <名字>
-//                     -ORBInitRef NameService=file://<ior>
+//                     -ORBInitRef NameService=corbaloc:iiop:<addr>/NameService
 //    [本进程]       CapeBackendFactory("corba:corbaname:...#<名字>")
 //                     → string_to_object 解析名字 → _narrow → 驱动对拍
 //
@@ -67,13 +67,27 @@ class Proc {
     Proc() = default;
     ~Proc() { stop(); }
 
-    bool start(const std::string& cmdline) {
+    // own_group=true 时用 CREATE_NEW_PROCESS_GROUP 且**不加** CREATE_NO_WINDOW：
+    // GenerateConsoleCtrlEvent 只能打给与调用方共用控制台的进程，而 CREATE_NO_WINDOW
+    // 会让子进程自带一个新控制台，于是信号送不到。代价是子进程的输出会混进测试控制台。
+    bool start(const std::string& cmdline, bool own_group = false) {
         std::string line = cmdline;
         STARTUPINFOA si{};
         si.cb = sizeof(si);
-        started_ = CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                                  nullptr, nullptr, &si, &pi_) != 0;
+        const DWORD flags = own_group ? CREATE_NEW_PROCESS_GROUP : CREATE_NO_WINDOW;
+        started_ = CreateProcessA(nullptr, line.data(), nullptr, nullptr, FALSE, flags, nullptr,
+                                  nullptr, &si, &pi_) != 0;
+        own_group_ = own_group;
         return started_;
+    }
+
+    // 发 CTRL_BREAK 让它走正常停机路径（解绑等清理都在那条路上）。
+    // 成功返回 true；触发不了时返回 false，由调用方决定是 SKIP 还是强杀——
+    // 绝不能在这里默默 Terminate 后当作「优雅退出过了」。
+    bool stopGracefully(DWORD wait_ms) {
+        if (!started_ || !own_group_) return false;
+        if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi_.dwProcessId)) return false;
+        return WaitForSingleObject(pi_.hProcess, wait_ms) == WAIT_OBJECT_0;
     }
     void stop() {
         if (!started_) return;
@@ -96,6 +110,7 @@ class Proc {
 
   private:
     bool started_ = false;
+    bool own_group_ = false;
     PROCESS_INFORMATION pi_{};
 };
 
@@ -181,6 +196,69 @@ TEST(XOptMINLPcoCorbaNaming, ResolvesThroughTheNamingService) {
     ns.stop();
     std::remove(ns_ior.c_str());
     std::remove(srv_ior.c_str());
+}
+
+// 滚动重启：新实例 rebind 抢走名字后，**旧实例停机不得把它删掉**。
+//
+// 这是评审（@chatgpt-codex-connector，P1）指出的：旧实例原先无条件 unbind，
+// 删掉的是新实例那份活的注册，于是两个都解析不到，而且悄无声息。
+// 单实例的用例覆盖不到——必须真让两个进程重叠一次。
+TEST(XOptMINLPcoCorbaNaming, ShutdownKeepsAReplacementsBinding) {
+    const std::string dir = exeDir();
+    const std::string ns_ior = dir + "\\ns2.ior";
+    const std::string ior_a = dir + "\\a.ior";
+    const std::string ior_b = dir + "\\b.ior";
+    const std::string name = "xOpt/Rolling";
+    const std::string ns_addr = "localhost:24568";
+    for (const auto* f : {&ns_ior, &ior_a, &ior_b}) std::remove(f->c_str());
+
+    Proc ns;
+    ASSERT_TRUE(ns.start("\"" + namingServiceExe() + "\" -ORBEndpoint iiop://" + ns_addr +
+                         " -o \"" + ns_ior + "\""));
+    std::string err;
+    ASSERT_FALSE(waitForFile(ns_ior, "IOR:", ns, std::chrono::seconds(30), err).empty()) << err;
+
+    const std::string init_ref =
+        " -ORBInitRef NameService=corbaloc:iiop:" + ns_addr + "/NameService";
+    auto serverCmd = [&](const std::string& ior_file) {
+        return "\"" + dir + "\\xOptMINLPcoCorbaServer.exe\"" + " --problem-dll \"" + dir +
+               "\\mock_xoptproblem.dll\"" + " --ior-file \"" + ior_file + "\" --name " + name +
+               init_ref;
+    };
+
+    // A 要能优雅停机（解绑逻辑在那条路径上），故给它自己的进程组
+    Proc a;
+    ASSERT_TRUE(a.start(serverCmd(ior_a), /*own_group*/ true));
+    ASSERT_FALSE(waitForFile(ior_a, "IOR:", a, std::chrono::seconds(30), err).empty()) << err;
+
+    // B 起来并 rebind，抢走名字
+    Proc b;
+    ASSERT_TRUE(b.start(serverCmd(ior_b)));
+    const std::string b_ior = waitForFile(ior_b, "IOR:", b, std::chrono::seconds(30), err);
+    ASSERT_FALSE(b_ior.empty()) << err;
+
+    // A 走**正常停机**路径——解绑逻辑只在那条路上，Terminate 会让本用例空过。
+    if (!a.stopGracefully(10000)) {
+        a.stop();
+        b.stop();
+        ns.stop();
+        GTEST_SKIP() << "触发不了 A 的优雅停机（CTRL_BREAK 未送达），"
+                        "本用例无法验证解绑的所有权判断——不做无效断言";
+    }
+
+    // 名字必须仍然可解析，且指向 B
+    CapeRegisterCorbaBackend();
+    std::string ferr;
+    std::unique_ptr<ICapeMINLPModel> consumer = CapeBackendFactory::instance().create(
+        "corba:corbaname::" + ns_addr + "#" + name, ferr);
+    ASSERT_NE(consumer, nullptr) << ferr;
+    EXPECT_EQ(consumer->connect(), 0)
+        << "旧实例停机后名字解析不到了——它把新实例的绑定删掉了: " << consumer->lastError();
+
+    consumer->disconnect();
+    b.stop();
+    ns.stop();
+    for (const auto* f : {&ns_ior, &ior_a, &ior_b}) std::remove(f->c_str());
 }
 
 }  // namespace
