@@ -61,7 +61,8 @@ endif()
 # ---- N4：CORBA 前端 ----
 if(WITH_XOPTMINLPCO_CORBA)
     add_library(xoptminlpco_corba STATIC MINLPServant.cpp)
-    # capeopen_corba PUBLIC 传递 TAO include/defines/libs + 生成的 SqpSolver* stub 头
+    # capeopen_corba PUBLIC 传递 TAO include/defines/libs + capeopen100_minlp
+    # 由 tao_idl 从 CAPEOPEN100_Minlp.idl 生成的 stub 头
     target_link_libraries(xoptminlpco_corba PUBLIC xoptminlpco capeopen_corba)
 
     # 独立进程 CORBA server：CORBA 没有 COM 那样的进程内激活，外部 ORB 只能

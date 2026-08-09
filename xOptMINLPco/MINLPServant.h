@@ -21,11 +21,18 @@
 //     本类是这条边界的生产端：入网 vids/cids 减一，出网结构索引加一。
 //     详见 CapeCorbaMarshal.h 顶部。
 //
-//  未实现的方法（属性族、变量类型/约束线性性、Hessian、Lagrange）一律抛
-//  CORBA::NO_IMPLEMENT：它是系统异常，无需出现在 IDL 的 raises 子句里，
-//  且语义准确——「这个操作我没实现」，而不是「调用失败了」。
-//  ICapeMINLPModel 抽象里没有这些概念，硬造一个空返回会让求解器以为
-//  拿到了真实答案。
+//  答不上来的方法一律不返回空值冒充真答案——ICapeMINLPModel 抽象里没有这些
+//  概念，硬造一个 0 会让求解器以为拿到了真实结果。分三类：
+//
+//    - 属性族、Lagrange：抛 CORBA::NO_IMPLEMENT。系统异常，无需出现在 IDL 的
+//      raises 子句里，语义也准确——「这个操作我没实现」，而不是「调用失败了」。
+//    - 变量类型 / 约束线性性：**有条件**。GetMINLPSize 已上报 niv / nlc，
+//      为 0 时「全连续」「全非线性」是从我们自己刚说过的话里推导出来的，照实
+//      返回；非 0 时才真的答不上来（不知道是哪几个），抛 NO_IMPLEMENT。
+//      很多求解器会无条件查这两项，一律抛异常会让它们直接中止。
+//    - Hessian 三件套：抛 ECapeHessianInfoNotAvailable。规范为此专设了这个
+//      用户异常，三个方法的 raises 子句都声明了它，比 NO_IMPLEMENT 更贴合
+//      「Hessian 信息拿不到」。异常体与 Common::Error 同构（见 throwNoHessian）。
 //
 //  编译需 WIN32/ACE_AS_STATIC_LIBS/TAO_AS_STATIC_LIBS（由 capeopen_corba 传递）。
 // ***************************************************************
@@ -123,7 +130,7 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
     void GetMINLPObjectiveFunctionBooleanAttribute(
         const char* attrib, ::CAPEOPEN100::Common::Types::CapeBoolean_out value) override;
     void GetMINLPObjectiveFunctionIntegerAttribute(
-        const char* attrib, ::CAPEOPEN100::Common::Types::CapeLong_out values) override;
+        const char* attrib, ::CAPEOPEN100::Common::Types::CapeLong_out value) override;
     void GetMINLPObjectiveFunctionDoubleAttribute(
         const char* attrib, ::CAPEOPEN100::Common::Types::CapeDouble_out value) override;
     void GetMINLPObjectiveFunctionStringAttribute(const char* attrib,
@@ -137,8 +144,8 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
         const char* lmtype, const ::CAPEOPEN100::Common::Types::CapeArrayLong& ids,
         ::CAPEOPEN100::Common::Types::CapeArrayDouble_out values) override;
     void GetMINLPHessianStructure(
-        ::CAPEOPEN100::Common::Types::CapeLong size,
-        const ::CAPEOPEN100::Common::Types::CapeArrayLong& rowindex,
+        ::CAPEOPEN100::Common::Types::CapeLong_out size,
+        ::CAPEOPEN100::Common::Types::CapeArrayLong_out rowindex,
         ::CAPEOPEN100::Common::Types::CapeArrayLong_out columnindex) override;
     void SetMINLPHessianValues(
         const ::CAPEOPEN100::Common::Types::CapeArrayDouble& values) override;

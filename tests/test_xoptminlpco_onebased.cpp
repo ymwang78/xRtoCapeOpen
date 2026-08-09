@@ -158,6 +158,10 @@ TEST_F(OneBasedWireTest, PastTheEndIsRejectedNotSilentlyZeroed) {
 
 // 规范（Error Common Interface §3.3）说 interfaceName / operation 是必填字段。
 // 光抛对类型不够——PME 拿它去定位问题，字段是空的就没意义。
+//
+// position 来自 ECapeBadArgument（§3.3.8），按 §5.2.1 的「body 要包含所有父错误
+// 的状态」平摊进 ECapeInvalidArgument：「The position of the argument value
+// within the signature of the operation. First argument is at position 1.」
 TEST_F(OneBasedWireTest, InvalidArgumentCarriesTheMandatoryFields) {
     try {
         ct::CapeArrayDouble_var lb, ub;
@@ -168,6 +172,21 @@ TEST_F(OneBasedWireTest, InvalidArgumentCarriesTheMandatoryFields) {
         EXPECT_STREQ(e.operation.in(), "GetMINLPVariableBounds");
         EXPECT_NE(std::string(e.description.in()).find("99"), std::string::npos)
             << "description 应指出是哪个 id 越界: " << e.description.in();
+        EXPECT_EQ(e.position, 1) << "vids 是 GetMINLPVariableBounds 的第 1 个参数";
+    }
+}
+
+// position 必须按操作签名算，不能写死 1。GetMINLPConstraintDerivativeValues 的
+// cids 排在 structtype 之后，是唯一一个不在首位的 id 参数——这条用例是它的
+// 唯一守卫：上一条用例即使 position 被硬编码成 1 也照样通过。
+TEST_F(OneBasedWireTest, InvalidArgumentPositionFollowsTheSignature) {
+    try {
+        ct::CapeArrayDouble_var vals;
+        minlp_->GetMINLPConstraintDerivativeValues("jacobian", wireIds({99}), vals.out());
+        FAIL() << "越界 cid 竟然没有报错";
+    } catch (const ::CAPEOPEN100::Common::Error::ECapeInvalidArgument& e) {
+        EXPECT_STREQ(e.operation.in(), "GetMINLPConstraintDerivativeValues");
+        EXPECT_EQ(e.position, 2) << "cids 排在 structtype 之后，是第 2 个参数";
     }
 }
 
@@ -211,6 +230,46 @@ TEST_F(OneBasedWireTest, UnimplementedMethodsSaySoRatherThanFakeAnAnswer) {
     ct::CapeArrayLong_var iattr;
     EXPECT_THROW(minlp_->GetMINLPVariableIntegerAttribute(wireIds({1}), "anything", iattr.out()),
                  CORBA::NO_IMPLEMENT);
+}
+
+// ECapeHessianInfoNotAvailable 的体从 1 个字段扩到了 6 个（官方类型库给它完整的
+// ECapeUser 属性集）。只断言异常类型的话，这五个新字段全空也照样绿——而
+// interfaceName / operation 按规范 §3.3 是必填，PME 靠它们定位问题。
+//
+// 三个 Hessian 方法共用 throwNoHessian，所以逐个查 operation：写死一个操作名
+// 是这里最容易犯的错，而单测一个方法看不出来。
+TEST_F(OneBasedWireTest, HessianErrorCarriesTheMandatoryFieldsPerOperation) {
+    auto operation_of = [](auto&& call) -> std::string {
+        try {
+            call();
+        } catch (const cm::ECapeHessianInfoNotAvailable& e) {
+            EXPECT_STREQ(e.interfaceName.in(), "ICapeMINLP");
+            EXPECT_STREQ(e.scope.in(), "CAPEOPEN100::Business::Numeric::Minlp");
+            EXPECT_STRNE(e.description.in(), "") << "description 不能为空";
+            return std::string(e.operation.in());
+        }
+        ADD_FAILURE() << "Hessian 调用竟然没有报错";
+        return {};
+    };
+
+    EXPECT_EQ(operation_of([&] {
+                  CORBA::Long sz;
+                  ct::CapeArrayLong_var r, c;
+                  minlp_->GetMINLPHessianStructure(sz, r.out(), c.out());
+              }),
+              "GetMINLPHessianStructure");
+
+    EXPECT_EQ(operation_of([&] {
+                  ct::CapeArrayDouble empty;
+                  minlp_->SetMINLPHessianValues(empty);
+              }),
+              "SetMINLPHessianValues");
+
+    EXPECT_EQ(operation_of([&] {
+                  ct::CapeArrayDouble_var v;
+                  minlp_->GetMINLPHessianValues(v.out());
+              }),
+              "GetMINLPHessianValues");
 }
 
 // 变量类型/约束线性性不再抛 NO_IMPLEMENT：GetMINLPSize 已上报 niv=0 / nlc=0，

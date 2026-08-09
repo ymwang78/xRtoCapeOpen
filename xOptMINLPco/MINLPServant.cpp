@@ -30,29 +30,41 @@ namespace ct = ::CAPEOPEN100::Common::Types;
 // 收到一个未声明的系统异常正好破坏本项目要的互操作性。
 //
 // interfaceName / operation 按规范（Error Common Interface §3.3）是必填字段。
+// 异常体没有 name 字段：Error Common Interface §5.2.1 明确 —— "the attribute name
+// present in the ECapeRoot is implicit. And the attribute name does not need to
+// be included in the body of a CORBA exception."，因为 CORBA::UserException 本身
+// 带 Repository ID。position 是 ECapeBadArgument 的属性（§3.3.8），按 §5.2.1
+// "its body needs to include the state of all the parent errors" 平摊进来，
+// 计数从 1 开始，故各调用点要给出该 id 数组在签名里的真实位次。
 [[noreturn]] void throwInvalidId(int wire_id, int count, const char* operation,
-                                 const char* id_kind) {
+                                 const char* id_kind, CORBA::Short arg_position) {
     std::string desc = std::string(id_kind) + " " + std::to_string(wire_id) +
                        " is out of range; CAPE-OPEN numbers them 1.." +
                        std::to_string(count);
     throw ::CAPEOPEN100::Common::Error::ECapeInvalidArgument(
-        /*name*/ "ECapeInvalidArgument",
         /*code*/ 0,
         /*description*/ desc.c_str(),
         /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
         /*interfaceName*/ "ICapeMINLP",
         /*operation*/ operation,
-        /*moreInfo*/ "");
+        /*moreInfo*/ "",
+        /*position*/ arg_position);
 }
 
+// arg_position 刻意**没有默认值**：它对 ICapeMINLP 里绝大多数操作是 1，但
+// GetMINLPConstraintDerivativeValues 的 cids 排在 structtype 之后是 2，而
+// GetMINLPLagrangeMultipliers 的 ids 同样在第 2 位（目前还是 NO_IMPLEMENT，
+// 将来补校验时会走到这里）。给个默认值就等于给那两个留了个静默报错的坑，
+// 而且报出来的 position 是「看着像对的」错值，最难发现。
 std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
-                                   const char* operation, const char* id_kind) {
+                                   const char* operation, const char* id_kind,
+                                   CORBA::Short arg_position) {
     std::vector<int> ids;
     indicesFromWire(wire, ids);
     for (size_t i = 0; i < ids.size(); ++i) {
         if (ids[i] < 0 || ids[i] >= count) {
             throwInvalidId(static_cast<int>(wire[static_cast<CORBA::ULong>(i)]), count, operation,
-                           id_kind);
+                           id_kind, arg_position);
         }
     }
     return ids;
@@ -63,7 +75,6 @@ std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
 // 第三方 CO 客户端 catch 的是它。
 [[noreturn]] void throwUnknown(const char* operation, const std::string& what) {
     throw ::CAPEOPEN100::Common::Error::ECapeUnknown(
-        /*name*/ "ECapeUnknown",
         /*code*/ 0,
         /*description*/ what.c_str(),
         /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
@@ -139,7 +150,7 @@ void MINLPServant::GetMINLPStructure(const char* structuretype, ct::CapeArrayLon
 
 void MINLPServant::GetMINLPVariableNames(const ct::CapeArrayLong& vids,
                                          ct::CapeArrayString_out vnames) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableNames"), "GetMINLPVariableNames", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableNames"), "GetMINLPVariableNames", "vids", 1);
     std::vector<std::string> names;
     if (model_->getVariableNames(ids, names) < 0)
         throwUnknown("GetMINLPVariableNames", "the model rejected getVariableNames");
@@ -158,7 +169,7 @@ void MINLPServant::GetMINLPVariableTypes(const ct::CapeArrayLong& vids,
     const CapeMINLPSize s = sizeOf(model_, "GetMINLPVariableTypes");
     if (s.num_integer_variables != 0) throw CORBA::NO_IMPLEMENT();
     const std::vector<int> ids =
-        wireIdsToInternal(vids, s.num_variables, "GetMINLPVariableTypes", "vids");
+        wireIdsToInternal(vids, s.num_variables, "GetMINLPVariableTypes", "vids", 1);
     const size_t n = ids.empty() ? static_cast<size_t>(s.num_variables) : ids.size();
     isinteger = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
@@ -189,7 +200,7 @@ void MINLPServant::GetMINLPVariableStringAttribute(const ct::CapeArrayLong& /*vi
 
 void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out LB, ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableBounds"), "GetMINLPVariableBounds", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableBounds"), "GetMINLPVariableBounds", "vids", 1);
     std::vector<double> lo, hi;
     if (model_->getVariableBounds(ids, lo, hi) < 0)
         throwUnknown("GetMINLPVariableBounds", "the model rejected getVariableBounds");
@@ -199,7 +210,7 @@ void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableValues"), "GetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableValues"), "GetMINLPVariableValues", "vids", 1);
     std::vector<double> v;
     if (model_->getVariableValues(ids, v) < 0)
         throwUnknown("GetMINLPVariableValues", "the model rejected getVariableValues");
@@ -208,7 +219,7 @@ void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           const ct::CapeArrayDouble& values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "SetMINLPVariableValues"), "SetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "SetMINLPVariableValues"), "SetMINLPVariableValues", "vids", 1);
     std::vector<double> v;
     fromDoubleSeq(values, v);
     if (model_->setVariableValues(ids, v) < 0)
@@ -219,7 +230,7 @@ void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
                                            ct::CapeArrayString_out cnames) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintNames"), "GetMINLPConstraintNames", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintNames"), "GetMINLPConstraintNames", "cids", 1);
     std::vector<std::string> names;
     if (model_->getConstraintNames(ids, names) < 0)
         throwUnknown("GetMINLPConstraintNames", "the model rejected getConstraintNames");
@@ -229,7 +240,7 @@ void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
 void MINLPServant::GetMINLPConstraintBounds(const ct::CapeArrayLong& cids,
                                             ct::CapeArrayDouble_out LB,
                                             ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintBounds"), "GetMINLPConstraintBounds", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintBounds"), "GetMINLPConstraintBounds", "cids", 1);
     std::vector<double> lo, hi;
     if (model_->getConstraintBounds(ids, lo, hi) < 0)
         throwUnknown("GetMINLPConstraintBounds", "the model rejected getConstraintBounds");
@@ -244,7 +255,7 @@ void MINLPServant::GetMINLPConstraintLinearity(const ct::CapeArrayLong& cids,
     const CapeMINLPSize s = sizeOf(model_, "GetMINLPConstraintLinearity");
     if (s.num_linear_constraints != 0) throw CORBA::NO_IMPLEMENT();
     const std::vector<int> ids =
-        wireIdsToInternal(cids, s.num_constraints, "GetMINLPConstraintLinearity", "cids");
+        wireIdsToInternal(cids, s.num_constraints, "GetMINLPConstraintLinearity", "cids", 1);
     const size_t n = ids.empty() ? static_cast<size_t>(s.num_constraints) : ids.size();
     islinear = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
@@ -275,7 +286,7 @@ void MINLPServant::GetMINLPConstraintStringAttribute(const ct::CapeArrayLong& /*
 
 void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& cids,
                                                      ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPNonlinearConstraintValues"), "GetMINLPNonlinearConstraintValues", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPNonlinearConstraintValues"), "GetMINLPNonlinearConstraintValues", "cids", 1);
     std::vector<double> v;
     if (model_->getNonlinearConstraintValues(ids, v) < 0)
         throwUnknown("GetMINLPNonlinearConstraintValues", "the model rejected getNonlinearConstraintValues");
@@ -285,7 +296,8 @@ void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& ci
 void MINLPServant::GetMINLPConstraintDerivativeValues(const char* structtype,
                                                       const ct::CapeArrayLong& cids,
                                                       ct::CapeArrayDouble_out vals) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintDerivativeValues"), "GetMINLPConstraintDerivativeValues", "cids");
+    // cids 是本操作签名里的第 2 个参数（structtype 在前），position 要照实报。
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintDerivativeValues"), "GetMINLPConstraintDerivativeValues", "cids", 2);
     std::vector<double> v;
     if (model_->getConstraintDerivativeValues(structtype, ids, v) < 0)
         throwUnknown("GetMINLPConstraintDerivativeValues", "the model rejected getConstraintDerivativeValues");
@@ -321,7 +333,7 @@ void MINLPServant::GetMINLPObjectiveFunctionBooleanAttribute(const char* /*attri
 }
 
 void MINLPServant::GetMINLPObjectiveFunctionIntegerAttribute(const char* /*attrib*/,
-                                                             ct::CapeLong_out /*values*/) {
+                                                             ct::CapeLong_out /*value*/) {
     throw CORBA::NO_IMPLEMENT();
 }
 
@@ -349,24 +361,38 @@ void MINLPServant::GetMINLPLagrangeMultipliers(const char* /*lmtype*/,
     throw CORBA::NO_IMPLEMENT();
 }
 
-void MINLPServant::GetMINLPHessianStructure(ct::CapeLong /*size*/,
-                                            const ct::CapeArrayLong& /*rowindex*/,
-                                            ct::CapeArrayLong_out /*columnindex*/) {
-    // 规范为此专门定义了 ECapeHessianInfoNotAvailable，但那是 IDL 里声明过的
-    // 用户异常，抛它需要 raises 子句支持——这里三个方法都声明了，故用它而非
-    // NO_IMPLEMENT，语义更贴合「Hessian 信息拿不到」。
+// 规范为此专门定义了 ECapeHessianInfoNotAvailable，但那是 IDL 里声明过的用户
+// 异常，抛它需要 raises 子句支持——下面三个方法都声明了，故用它而非
+// NO_IMPLEMENT，语义更贴合「Hessian 信息拿不到」。
+//
+// 该异常归 Minlp 自己的作用域，但体与 Common::Error 一致：官方类型库给了它完整
+// 的 ECapeUser 属性集，说明 §5.2.1 的平摊规则同样适用。
+namespace {
+
+[[noreturn]] void throwNoHessian(const char* operation) {
     throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+        /*code*/ 0,
+        /*description*/ "xOptProblem exposes no Hessian",
+        /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
+        /*interfaceName*/ "ICapeMINLP",
+        /*operation*/ operation,
+        /*moreInfo*/ "");
+}
+
+}  // namespace
+
+void MINLPServant::GetMINLPHessianStructure(ct::CapeLong_out /*size*/,
+                                            ct::CapeArrayLong_out /*rowindex*/,
+                                            ct::CapeArrayLong_out /*columnindex*/) {
+    throwNoHessian("GetMINLPHessianStructure");
 }
 
 void MINLPServant::SetMINLPHessianValues(const ct::CapeArrayDouble& /*values*/) {
-    throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+    throwNoHessian("SetMINLPHessianValues");
 }
 
 void MINLPServant::GetMINLPHessianValues(ct::CapeArrayDouble_out /*values*/) {
-    throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+    throwNoHessian("GetMINLPHessianValues");
 }
 
 // -------------------------------------------------------- ICapeIdentification

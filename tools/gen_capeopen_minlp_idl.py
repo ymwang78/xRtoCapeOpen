@@ -49,10 +49,92 @@ ERR_COMMON = ['ECapeUnknown', 'ECapeInvalidArgument', 'ECapeOutOfResources', 'EC
               'ECapeTimeOut', 'ECapeSolvingError', 'ECapeLicenceError',
               'ECapeFailedInitialisation', 'ECapeBadInvOrder']
 
+# Error Common Interface.pdf section 5.2.1 states the CORBA form of these bodies
+# outright, so they are transcribed rather than inferred:
+#
+#   "The abstract errors (ECapeRoot, ECapeUser and ECapeBoundaries) are ignored.
+#    Each other error is translated to a CORBA exception. Its body needs to
+#    include the state of all the parent errors (abstract or not) according to
+#    the inheritance scheme. There are 23 exceptions."
+#
+#   "...the attribute name present in the ECapeRoot is implicit. And the
+#    attribute name does not need to be included in the body of a CORBA
+#    exception."
+#
+# Hence ECapeUser's six attributes are flattened into every exception and `name`
+# is deliberately absent -- CORBA::UserException / org.omg.CORBA.UserException
+# already carry it, which is exactly the reason the specification gives.
+#
+# The order below is section 3.3.2's own attribute table, transcribed rather
+# than chosen. CDR is positional, so this matters.
+ERR_MEMBERS = [('CapeLong', 'code'), ('CapeString', 'description'),
+               ('CapeString', 'scope'), ('CapeString', 'interfaceName'),
+               ('CapeString', 'operation'), ('CapeURL', 'moreInfo')]
+
+# The "state of all the parent errors" that section 5.2.1 requires each exception
+# to repeat, beyond ECapeUser's six.
+#
+# Walking section 3.3 for the nine exceptions emitted here: ECapeBadArgument is
+# the only ancestor of any of them that declares state of its own (3.3.8,
+# position : CapeShort, inherited by ECapeInvalidArgument). Every other error on
+# those paths -- ECapeData, ECapeImplementation, ECapeComputation -- is
+# "Attributes: None". ECapeBadInvOrder's requestedOperation is not inherited at
+# all; 3.3.20 declares it on ECapeBadInvOrder itself.
+ERR_EXTRA_MEMBERS = {
+    'ECapeInvalidArgument': [('CapeShort', 'position')],
+    'ECapeBadInvOrder': [('CapeString', 'requestedOperation')],
+}
+
 T = '::CAPEOPEN100::Common::Types::'
 E = '::CAPEOPEN100::Common::Error::'
 
 IFACES = ['ICapeMINLP', 'ICapeMINLPSystem', 'ICapeMINLPSolverManager']
+
+# Corrections taken from CAPE-OPENv1-0-0.tlb -- the type library CO-LaN itself
+# compiles and ships (download 17 of the "CAPE-OPEN IDL" project, inside
+# CAPE-OPEN/Common/CAPE-OPEN/Type Libraries/; its typelib name is CAPEOPEN100).
+#
+# Where that artefact and the section 3.6 prose disagree, the artefact wins. It
+# is produced from the same interface definitions the official .idl comes from,
+# whereas the printed tables are known to contain transcription errors -- see
+# ERR_FIXUPS for two more of them. Everything else in the tables was confirmed
+# against the type library: same 32 operations, same order, same argument names.
+#
+# Keyed by (interface, method, argument name as printed in the PDF).
+TLB_ARG_OVERRIDES = {
+    # All four ObjectiveFunction*Attribute getters return one scalar, and the
+    # type library names the argument `value` in every one. Only the Integer row
+    # of the table pluralises it.
+    ('ICapeMINLP', 'GetMINLPObjectiveFunctionIntegerAttribute', 'values'):
+        ('out', 'value'),
+    # The table marks size and rowindex [in], which would have the caller supply
+    # the sparsity pattern it is asking for. In the type library all three are
+    # by-reference outputs, matching GetMINLPStructure directly above it.
+    ('ICapeMINLP', 'GetMINLPHessianStructure', 'size'): ('out', 'size'),
+    ('ICapeMINLP', 'GetMINLPHessianStructure', 'rowindex'): ('out', 'rowindex'),
+}
+
+
+def apply_tlb_overrides(methods):
+    """Apply TLB_ARG_OVERRIDES, refusing to emit if any of them stopped matching.
+
+    A silently-skipped override would put the file back into the state this
+    correction exists to fix, and nothing downstream would notice.
+    """
+    unused = set(TLB_ARG_OVERRIDES)
+    for m in methods:
+        for i, (d, n, t, raw) in enumerate(m['args']):
+            key = (m['iface'], m['method'], n)
+            if key in TLB_ARG_OVERRIDES:
+                new_dir, new_name = TLB_ARG_OVERRIDES[key]
+                m['args'][i] = (new_dir, new_name, t, raw)
+                unused.discard(key)
+    if unused:
+        raise RuntimeError(
+            'these TLB corrections no longer match anything in the parsed '
+            'tables, so the generated IDL would silently revert: '
+            + ', '.join(sorted('%s.%s(%s)' % k for k in unused)))
+    return methods
 
 # 每个 CO 业务接口都继承 ICapeIdentification。依据（均在 docs/ 下）：
 #
@@ -250,32 +332,34 @@ HEADER = '''// =================================================================
 //    module Business::Numeric::Minlp (35 operations)
 //      Optimisation_Interface_Specification.pdf, sections 3.6.1 / 3.6.2 /
 //      3.6.3 method tables. Each operation's [in]/[out] directions, types and
-//      raises clause were parsed out of that text by the generator.
+//      raises clause were parsed out of that text by the generator, then
+//      checked operation by operation against CAPE-OPENv1-0-0.tlb (below).
+//
+//    Cross-check against CO-LaN's own compiled artefact
+//      CAPE-OPENv1-0-0.tlb ships in the "CAPE-OPEN IDL" project, download 17,
+//      under CAPE-OPEN/Common/CAPE-OPEN/Type Libraries/. Its typelib name is
+//      CAPEOPEN100 and it carries the whole MINLP family. Comparing it with
+//      this file: same 32 ICapeMINLP operations, same order, same argument
+//      names throughout. Three arguments in the printed tables disagreed with
+//      it and the type library was followed -- see TLB_ARG_OVERRIDES in the
+//      generator. The type library is COM, so it says nothing about Repository
+//      IDs or exception bodies; those still rest on the sources above.
+//
+//    module Common::Error bodies
+//      Error Common Interface.pdf section 5.2.1, which specifies the CORBA
+//      translation directly: the abstract errors are dropped, each remaining
+//      error repeats "the state of all the parent errors ... according to the
+//      inheritance scheme", and `name` is deliberately left out because
+//      CORBA::UserException already carries it. Attribute names and types come
+//      from the section 3.3 tables.
 //
 //  KNOWN DEVIATIONS -- check these against the official .idl when it arrives
 //
-//    1. The exception *members* in module Common::Error are reconstructed, and
-//       this is the ACTIVE risk in this file -- read it before interoperating.
-//
-//       The Error specification section 3.3 gives the conceptual attributes
-//       (ECapeRoot.name plus ECapeUser.{code, description, scope,
-//       interfaceName, operation, moreInfo}) but not the exact CORBA IDL form,
-//       so the member list and order below are inferred. The uniform member set
-//       used here is also known to be incomplete: section 3.3 gives
-//       ECapeInvalidArgument an additional `position` attribute, which is not
-//       reproduced.
-//
-//       What that costs on the wire: a Repository ID does not depend on a
-//       raises clause, and successful calls are unaffected. But the servant
-//       does raise ECapeInvalidArgument (an out-of-range vid/cid, which a real
-//       solver will hit) and ECapeUnknown (any model-side failure), so this is
-//       a path clients exercise, not a theoretical one. If the official member
-//       layout differs, a client compiled from the official IDL decodes our
-//       exception body wrongly -- most likely surfacing as CORBA::MARSHAL
-//       instead of the clean "invalid argument" we meant to report.
-//
-//       Until the official .idl is available, treat a marshalling failure on an
-//       error path as this deviation until proven otherwise.
+//    1. Only nine of the twenty-three Common::Error exceptions are emitted --
+//       the ones the Minlp raises clauses actually name. The official file
+//       declares all twenty-three (section 5.2.1 counts them). This is a subset,
+//       not a divergence: a client compiled from the official IDL sees the same
+//       Repository ID and the same body for each exception present here.
 //
 //    2. The UNDEFINED constants of Common::Types are omitted. The document
 //       writes them in mathematical notation (e.g. -2^31), which is not legal
@@ -285,9 +369,15 @@ HEADER = '''// =================================================================
 //       ECapeUnkown -> ECapeUnknown, and ECapeT imeOut (a hard line break in
 //       the PDF) -> ECapeTimeOut.
 //
-//    4. GetMINLPHessianStructure takes rowindex as [in] and columnindex as
-//       [out]. The asymmetry looks wrong but matches the specification, so it
-//       is transcribed unchanged.
+//    4. Three arguments follow CAPE-OPENv1-0-0.tlb rather than the section 3.6
+//       tables, because the two disagree and the type library is the artefact
+//       CO-LaN generates from the same definitions the official .idl comes from:
+//         GetMINLPHessianStructure           size, rowindex: [in] -> [out]
+//         GetMINLPObjectiveFunctionIntegerAttribute   values -> value
+//       The Hessian asymmetry ([in] rowindex with [out] columnindex) had already
+//       been flagged here as looking wrong; the type library settles it. The
+//       generator refuses to emit if either correction stops matching, so the
+//       file cannot quietly revert.
 //
 //    5. The specification mentions "an Array type is also defined to hold
 //       sequences of these types" (of CapeMINLPObjFunType), but no method table
@@ -359,10 +449,17 @@ module CAPEOPEN100 {
 
     }; // END Types
 
-    // Source: Error Common Interface.pdf section 3.3. Members are reconstructed
-    // -- see deviation 1 in the file header. CORBA exceptions do not support
-    // inheritance (that specification says so in section 5.2.1), so each
-    // exception repeats the full member set.
+    // Source: Error Common Interface.pdf. Section 5.2.1 gives the CORBA
+    // translation rule -- CORBA exceptions do not support inheritance, so the
+    // abstract errors are dropped and each concrete exception repeats "the
+    // state of all the parent errors ... according to the inheritance scheme";
+    // the same section drops `name`, which CORBA::UserException already carries.
+    // Section 3.3 supplies the attribute names, types and order per class.
+    //
+    // What is still inferred: where an inherited extra member sits relative to
+    // the six from ECapeUser. Ancestor-first is assumed, so ECapeUser's six come
+    // first and the nearer parent's member last. CDR is positional, so if the
+    // official file orders them the other way a client decodes the tail wrongly.
     module Error {
 '''
 
@@ -401,15 +498,16 @@ FOOTER = '''
         enum CapeMINLPObjFunType { MAX, MIN };
 
         // Errors owned by Optimisation. The specification allows a CO interface
-        // to define its own errors within its own scope.
-        exception ECapeHessianInfoNotAvailable {
-          ::CAPEOPEN100::Common::Types::CapeString description;
-        };
-        exception ECapeOutsideSolverScope {
-          ::CAPEOPEN100::Common::Types::CapeString description;
-        };
-
-'''
+        // to define its own errors within its own scope, and Error Common
+        // Interface.pdf section 5.2.1 counts exactly 23 exceptions in
+        // Common::Error -- the type library's error-code enumeration has 25
+        // entries, the extra two being these, which corroborates that they
+        // belong here and not there.
+        //
+        // The type library gives each of them the full ECapeUser attribute set
+        // (13 dispatch entries = 7 IUnknown/IDispatch + 6), so they carry the
+        // same body as every Common::Error exception.
+%%MINLP_ERRORS%%'''
 
 TAIL = '''      }; // END Minlp
 
@@ -427,14 +525,17 @@ def emit(methods):
     for m in methods:
         by.setdefault(m['iface'], []).append(m)
 
+    def body(name, indent):
+        rows = ERR_MEMBERS + ERR_EXTRA_MEMBERS.get(name, [])
+        return ''.join(f'{indent}{T}{t:<9} {n};\n' for t, n in rows)
+
     parts = [HEADER]
-    members = ''.join(f'        {T}{t:<9} {n};\n' for t, n in [
-        ('CapeString', 'name'), ('CapeLong', 'code'), ('CapeString', 'description'),
-        ('CapeString', 'scope'), ('CapeString', 'interfaceName'),
-        ('CapeString', 'operation'), ('CapeURL', 'moreInfo')])
     for e in ERR_COMMON:
-        parts.append(f'      exception {e} {{\n{members}      }};\n')
-    parts.append(FOOTER)
+        parts.append(f'      exception {e} {{\n{body(e, "        ")}      }};\n')
+    minlp_errors = ''.join(
+        f'        exception {e} {{\n{body(e, "          ")}        }};\n\n'
+        for e in sorted(MINLP_OWN_ERRORS))
+    parts.append(FOOTER.replace('%%MINLP_ERRORS%%', minlp_errors))
     parts.append('        // The operations below were generated from the section 3.6 method\n'
                  '        // tables. Types are spelled out fully rather than aliased locally:\n'
                  '        // a typedef here would mint Repository IDs under Minlp that the\n'
@@ -460,7 +561,7 @@ def main():
         sys.exit(f'not found: {pdf}\n'
                  f'pass the documentation set directory as the first argument')
 
-    methods = parse_methods(pdf_text(pdf))
+    methods = apply_tlb_overrides(parse_methods(pdf_text(pdf)))
     bad = check(methods)
     if bad:
         print('refusing to emit -- unresolved items:', file=sys.stderr)

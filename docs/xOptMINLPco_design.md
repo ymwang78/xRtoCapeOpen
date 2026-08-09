@@ -259,7 +259,8 @@ xOptProblem 的 0-based 下标。全程无转换。
 - 越界 id 抛 IDL 里**声明过**的 `ECapeInvalidArgument`（模型侧失败抛 `ECapeUnknown`），
   而非静默放过、也不用系统异常。v1 的 `pick()` 对越界 id 返回 `T{}`，于是「求解器发了个
   非法 id」会变成「悄悄返回 0」；而抛系统异常则让 catch 用户异常的第三方客户端收到未声明
-  的东西。注意这条同时把 §6.6 的异常体风险从「理论」变成了「活跃」。
+  的东西。异常体按 `Error Common Interface.pdf` §5.2.1 的 CORBA 映射规则构造（无 `name`、
+  平摊父错误状态），并已跨 ORB 验证，见 §6.6。
 - `RefCapeMINLPServant`（capeopen_core 里扮演第三方 CO 组件的参考实现）同步迁移，并**刻意
   不复用** `indicesToWire/FromWire`，自己写一份加减一。它存在的意义就是给消费端换基做独立
   校验；共用 helper 的话，helper 里的错会让两端一致地偏、测试照样全绿。
@@ -359,25 +360,64 @@ are numbered starting from 1」写在接口规范里、**与绑定无关**，所
 
 | 风险 | 状态 | 影响 |
 |------|------|------|
-| 重建的 `Common::Error` 异常成员未与官方 IDL 核对 | 🔴 **活跃** | 见下 |
+| 异常体成员**集合**（含 `name` 的取舍）无据 | ✅ 已解决 | 见下——§5.2.1 是明文规则 |
+| 异常体成员**次序**未与官方 IDL 核对 | 🟡 已大幅收窄 | 见下——CDR 按位置解码，仍是唯一的编解码风险 |
 | ~~COM 绑定仍 0-based~~ | ✅ 已修 | §6.5（issue #2） |
+| ~~未经第三方 ORB 实测~~ | ✅ 已验证 | 见下（注意它证的是协议互通，不是与官方 IDL 一致） |
 | 能力上是 NLP-only，非完整 MINLP | 🟡 需明示 | §6.4 |
-| 未经第三方 ORB 实测 | 🟡 未验证 | 步骤 4，目前所有验证两端都是我们的代码 |
 | 无 MINLP 专用组件类别 | 🟡 规范所限 | §6.7——规范里就没有，已注册通用类别；非我方缺失 |
 
-**为什么异常体风险从「理论」升级成了「活跃」**：这一条最初记录时，我们从不抛这些用户异常
-（越界抛 `BAD_PARAM`、模型失败抛 `INTERNAL`，都是系统异常），所以「重建的成员布局不对也没人
-碰得到」。评审推动的两轮修复把它们改成了抛**声明过的** `ECapeInvalidArgument` /
-`ECapeUnknown`——这是对的，但也意味着重建的异常体现在位于**客户端真会走到的路径**上
-（越界 vid/cid 是真实求解器会撞到的）。
+**异常体风险是怎么关掉的（2026-08）**：这条风险的前提是「规范只给了概念层属性表，没给
+CORBA 形式」。这个前提是错的——`Error Common Interface.pdf` **§5.2.1 就是 CORBA 映射的
+明文规则**，一直在 `docs/` 里，只是当初没读到那一节：
 
-若官方成员布局与我们的不同，第三方按官方 IDL 解码我们的异常体会失败，多半表现为
-`CORBA::MARSHAL`——本来想报的那个干净的「参数非法」反而变成一个费解的编解码错误。
-已知我们的统一成员集至少缺 `ECapeInvalidArgument` 的 `position`（规范 §3.3 有）。
+> 抽象错误（`ECapeRoot`/`ECapeUser`/`ECapeBoundaries`）忽略，其余每个翻成一个 CORBA
+> exception，其 body 需按继承链包含**所有父错误的状态**，共 23 个。……
+> "the attribute `name` present in the ECapeRoot is implicit. And the attribute `name`
+> **does not need to be included** in the body of a CORBA exception."
 
-修复只能等官方 `CAPE-OPENv1-0-0.idl`：在没有它的情况下继续猜成员只会增加分歧面，不会降低风险。
-在那之前，**错误路径上的 marshalling 失败应先按这一条排查**。同样的说明也写在
-`CAPEOPEN100_Minlp.idl` 文件头「已知偏差 1」里——那才是第三方会读到的地方。
+于是原来那份「统一 7 成员含 `name`」有两处错：`name` 根本不该出现（`CORBA::UserException`
+自带 Repository ID，这正是规范给的理由），而父错误的状态该平摊进来却没有。现在的 body 是
+`ECapeUser` 的 6 个成员，加上 `ECapeInvalidArgument` 的 `position`（来自 `ECapeBadArgument`
+§3.3.8）和 `ECapeBadInvOrder` 的 `requestedOperation`（§3.3.20）。
+
+**这两个额外成员为什么就是全部**：按 §3.3 走一遍本文件发射的那 9 个异常的继承链，
+祖先里唯一自带状态的是 `ECapeBadArgument`（`position`，由 `ECapeInvalidArgument` 继承）；
+其余经过的 `ECapeData` / `ECapeImplementation` / `ECapeComputation` 都是 "Attributes: None"。
+`ECapeBadInvOrder` 的 `requestedOperation` 不是继承来的，§3.3.20 就写在它自己身上。
+（先前这里写成「中间层错误全都是 Attributes: None」，与紧接着引用的
+`ECapeBadArgument.position` 自相矛盾；IDL 体是对的，是这句话写错了。）
+
+**仍然存疑的是次序，不是集合**：6 个成员的相对顺序照抄 §3.3.2 的属性表，有据；但
+`position` 相对那 6 个放在哪，规范没写，这里按「祖先在前」推断为放在末尾。CDR 是按位置
+解码的，若官方 IDL 反过来，客户端会把尾部解错。这是本文件目前唯一真正的编解码风险。
+
+**同时用官方类型库交叉核对了操作签名**：CO-LaN 自己编译发布的 `CAPE-OPENv1-0-0.tlb`
+（"CAPE-OPEN IDL" 项目下载项 17）含完整 MINLP 接口族，类型库名就叫 `CAPEOPEN100`。
+逐条比对结果是 32 vs 32、**名字与顺序完全一致、参数名一致**，只有 3 个参数不符——
+那 3 处是 PDF 方法表的转录错误，已按类型库改正（见 IDL 文件头「已知偏差 4」）。
+类型库是 COM 侧，给不了 Repository ID 和异常体，那两项仍靠上面的规范条文。
+
+**第三方 ORB 实测（2026-08）**：用 **JacORB**（非 TAO，独立实现）编译同一份
+`CAPEOPEN100_Minlp.idl`，写客户端连 `xOptMINLPcoCorbaServer`。断言全部手写、不复用本项目
+任何转换代码。结果：`_is_a("IDL:CAPEOPEN100/Business/Numeric/Minlp/ICapeMINLP:1.0")` 为真
+（并对伪造 RID 返回假，非空验证）、`narrow` 成功、继承来的 `GetComponentName` 走通、
+1-based id 行为正确（`{1,2}` 得到两个变量，`0` 被拒——0-based 服务端在这里会成功返回第一个
+变量）、`ECapeInvalidArgument` 连同 `position` 跨 ORB 正确解码。
+
+Wireshark 对同一次会话的抓包**零配置**即解析出 `GIOP 1.2 Request op=GetMINLPVariableNames`
+与 `giop.exceptionid: IDL:CAPEOPEN100/Common/Error/ECapeInvalidArgument:1.0`；JacORB 的
+`PrintIOR` 解我们的 IOR，连 `TAG_ORB_TYPE` 都认出是 TAO。
+
+**跨 ORB 通过证明了什么、没证明什么**：JacORB 用的是**我们这份**重建 IDL 编出来的桩，两端
+因此共享同一套成员布局。所以它证明的是——线上格式是标准 GIOP、RID 推导与独立实现一致、
+异常在 IDL 声明的 raises 里正确编解码、1-based 边界从外部观察正确。它**证不了**我们的布局
+与官方 `CAPE-OPENv1-0-0.idl` 一致；一个按官方 IDL 编译的客户端仍可能在次序上解错。
+关掉「成员集合」那条风险的是 §5.2.1 这份规范条文，不是 JacORB。
+
+仍然拿不到官方 `CAPE-OPENv1-0-0.idl`（CO-LaN 的下载区只有文档集与 COM 类型库，没有 IDL），
+所以 issue #3 不关。它的剩余内容收窄为两点：取得权威原件以求完备，以及核对上面那条
+成员次序——后者是唯一还可能在错误路径上真出问题的地方。
 
 ### 6.7 组件类别注册（issue #5）：**规范里没有 MINLP 类别**
 
