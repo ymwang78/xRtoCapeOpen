@@ -123,7 +123,7 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
     void GetMINLPObjectiveFunctionBooleanAttribute(
         const char* attrib, ::CAPEOPEN100::Common::Types::CapeBoolean_out value) override;
     void GetMINLPObjectiveFunctionIntegerAttribute(
-        const char* attrib, ::CAPEOPEN100::Common::Types::CapeLong_out values) override;
+        const char* attrib, ::CAPEOPEN100::Common::Types::CapeLong_out value) override;
     void GetMINLPObjectiveFunctionDoubleAttribute(
         const char* attrib, ::CAPEOPEN100::Common::Types::CapeDouble_out value) override;
     void GetMINLPObjectiveFunctionStringAttribute(const char* attrib,
@@ -137,8 +137,8 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
         const char* lmtype, const ::CAPEOPEN100::Common::Types::CapeArrayLong& ids,
         ::CAPEOPEN100::Common::Types::CapeArrayDouble_out values) override;
     void GetMINLPHessianStructure(
-        ::CAPEOPEN100::Common::Types::CapeLong size,
-        const ::CAPEOPEN100::Common::Types::CapeArrayLong& rowindex,
+        ::CAPEOPEN100::Common::Types::CapeLong_out size,
+        ::CAPEOPEN100::Common::Types::CapeArrayLong_out rowindex,
         ::CAPEOPEN100::Common::Types::CapeArrayLong_out columnindex) override;
     void SetMINLPHessianValues(
         const ::CAPEOPEN100::Common::Types::CapeArrayDouble& values) override;

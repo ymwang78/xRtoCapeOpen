@@ -30,29 +30,36 @@ namespace ct = ::CAPEOPEN100::Common::Types;
 // 收到一个未声明的系统异常正好破坏本项目要的互操作性。
 //
 // interfaceName / operation 按规范（Error Common Interface §3.3）是必填字段。
+// 异常体没有 name 字段：Error Common Interface §5.2.1 明确 —— "the attribute name
+// present in the ECapeRoot is implicit. And the attribute name does not need to
+// be included in the body of a CORBA exception."，因为 CORBA::UserException 本身
+// 带 Repository ID。position 是 ECapeBadArgument 的属性（§3.3.8），按 §5.2.1
+// "its body needs to include the state of all the parent errors" 平摊进来，
+// 计数从 1 开始，故各调用点要给出该 id 数组在签名里的真实位次。
 [[noreturn]] void throwInvalidId(int wire_id, int count, const char* operation,
-                                 const char* id_kind) {
+                                 const char* id_kind, CORBA::Short arg_position) {
     std::string desc = std::string(id_kind) + " " + std::to_string(wire_id) +
                        " is out of range; CAPE-OPEN numbers them 1.." +
                        std::to_string(count);
     throw ::CAPEOPEN100::Common::Error::ECapeInvalidArgument(
-        /*name*/ "ECapeInvalidArgument",
         /*code*/ 0,
         /*description*/ desc.c_str(),
         /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
         /*interfaceName*/ "ICapeMINLP",
         /*operation*/ operation,
-        /*moreInfo*/ "");
+        /*moreInfo*/ "",
+        /*position*/ arg_position);
 }
 
 std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
-                                   const char* operation, const char* id_kind) {
+                                   const char* operation, const char* id_kind,
+                                   CORBA::Short arg_position = 1) {
     std::vector<int> ids;
     indicesFromWire(wire, ids);
     for (size_t i = 0; i < ids.size(); ++i) {
         if (ids[i] < 0 || ids[i] >= count) {
             throwInvalidId(static_cast<int>(wire[static_cast<CORBA::ULong>(i)]), count, operation,
-                           id_kind);
+                           id_kind, arg_position);
         }
     }
     return ids;
@@ -63,7 +70,6 @@ std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
 // 第三方 CO 客户端 catch 的是它。
 [[noreturn]] void throwUnknown(const char* operation, const std::string& what) {
     throw ::CAPEOPEN100::Common::Error::ECapeUnknown(
-        /*name*/ "ECapeUnknown",
         /*code*/ 0,
         /*description*/ what.c_str(),
         /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
@@ -285,7 +291,8 @@ void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& ci
 void MINLPServant::GetMINLPConstraintDerivativeValues(const char* structtype,
                                                       const ct::CapeArrayLong& cids,
                                                       ct::CapeArrayDouble_out vals) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintDerivativeValues"), "GetMINLPConstraintDerivativeValues", "cids");
+    // cids 是本操作签名里的第 2 个参数（structtype 在前），position 要照实报。
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintDerivativeValues"), "GetMINLPConstraintDerivativeValues", "cids", 2);
     std::vector<double> v;
     if (model_->getConstraintDerivativeValues(structtype, ids, v) < 0)
         throwUnknown("GetMINLPConstraintDerivativeValues", "the model rejected getConstraintDerivativeValues");
@@ -321,7 +328,7 @@ void MINLPServant::GetMINLPObjectiveFunctionBooleanAttribute(const char* /*attri
 }
 
 void MINLPServant::GetMINLPObjectiveFunctionIntegerAttribute(const char* /*attrib*/,
-                                                             ct::CapeLong_out /*values*/) {
+                                                             ct::CapeLong_out /*value*/) {
     throw CORBA::NO_IMPLEMENT();
 }
 
@@ -349,24 +356,38 @@ void MINLPServant::GetMINLPLagrangeMultipliers(const char* /*lmtype*/,
     throw CORBA::NO_IMPLEMENT();
 }
 
-void MINLPServant::GetMINLPHessianStructure(ct::CapeLong /*size*/,
-                                            const ct::CapeArrayLong& /*rowindex*/,
-                                            ct::CapeArrayLong_out /*columnindex*/) {
-    // 规范为此专门定义了 ECapeHessianInfoNotAvailable，但那是 IDL 里声明过的
-    // 用户异常，抛它需要 raises 子句支持——这里三个方法都声明了，故用它而非
-    // NO_IMPLEMENT，语义更贴合「Hessian 信息拿不到」。
+// 规范为此专门定义了 ECapeHessianInfoNotAvailable，但那是 IDL 里声明过的用户
+// 异常，抛它需要 raises 子句支持——下面三个方法都声明了，故用它而非
+// NO_IMPLEMENT，语义更贴合「Hessian 信息拿不到」。
+//
+// 该异常归 Minlp 自己的作用域，但体与 Common::Error 一致：官方类型库给了它完整
+// 的 ECapeUser 属性集，说明 §5.2.1 的平摊规则同样适用。
+namespace {
+
+[[noreturn]] void throwNoHessian(const char* operation) {
     throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+        /*code*/ 0,
+        /*description*/ "xOptProblem exposes no Hessian",
+        /*scope*/ "CAPEOPEN100::Business::Numeric::Minlp",
+        /*interfaceName*/ "ICapeMINLP",
+        /*operation*/ operation,
+        /*moreInfo*/ "");
+}
+
+}  // namespace
+
+void MINLPServant::GetMINLPHessianStructure(ct::CapeLong_out /*size*/,
+                                            ct::CapeArrayLong_out /*rowindex*/,
+                                            ct::CapeArrayLong_out /*columnindex*/) {
+    throwNoHessian("GetMINLPHessianStructure");
 }
 
 void MINLPServant::SetMINLPHessianValues(const ct::CapeArrayDouble& /*values*/) {
-    throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+    throwNoHessian("SetMINLPHessianValues");
 }
 
 void MINLPServant::GetMINLPHessianValues(ct::CapeArrayDouble_out /*values*/) {
-    throw ::CAPEOPEN100::Business::Numeric::Minlp::ECapeHessianInfoNotAvailable(
-        "xOptProblem exposes no Hessian");
+    throwNoHessian("GetMINLPHessianValues");
 }
 
 // -------------------------------------------------------- ICapeIdentification

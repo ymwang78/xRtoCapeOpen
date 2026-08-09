@@ -476,9 +476,14 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
 - [x] production `string_to_object(IOR)` 跨进程冒烟已落地（`tests/test_xoptminlpco_corba_ipc.cpp`）。
 - [x] `corbaname:` 端到端已落地（issue #6，`tests/test_xoptminlpco_corba_naming.cpp` 真起一个
   naming 进程）。消费端本来就支持——`string_to_object` 认 `corbaname:`——缺的是服务端 bind。
-- [ ] 待办：第三方 ORB 实证 → issue #4；跨后端一致性测试
-  （同一问题经 COM 与 CORBA 输出相等）——issue #2 已修，两个绑定的线上索引基现已一致，
-  这条因此变得有意义了；`option(CAPEOPEN_SINGLE_DLL)` 合编。
+- [x] 第三方 ORB 实证已完成（2026-08）：**JacORB** 编同一份 `CAPEOPEN100_Minlp.idl`，
+  客户端连 `xOptMINLPcoCorbaServer`，`_is_a` / `narrow` / 继承的 `GetComponentName` /
+  1-based 边界 / `ECapeInvalidArgument` 跨 ORB 解码全部通过；Wireshark 零配置解出
+  `op=GetMINLPVariableNames` 与 `giop.exceptionid`。详见 `xOptMINLPco_design.md` §6.6。
+  issue #4 剩下的是拿到真实第三方 PME 驱动，而 CAPE-OPEN 的 Optimisation/MINLP 至今没有
+  已知的商业消费方（CO-LaN 自述 Numerical Solvers 规范停在 1999 年 1.08 且无 SIG 维护）。
+- [ ] 待办：跨后端一致性测试（同一问题经 COM 与 CORBA 输出相等）——issue #2 已修，
+  两个绑定的线上索引基现已一致，这条因此变得有意义了；`option(CAPEOPEN_SINGLE_DLL)` 合编。
 
 **M5 — 收尾**
 - 文档补充整数松弛限制、线程套间约束、`size` 升级规范。

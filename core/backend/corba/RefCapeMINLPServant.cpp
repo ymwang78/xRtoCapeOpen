@@ -232,15 +232,24 @@ void RefCapeMINLPServant::GetMINLPLagrangeMultipliers(const char*, const ct::Cap
                                                       ct::CapeArrayDouble_out) {
     throw CORBA::NO_IMPLEMENT();
 }
-void RefCapeMINLPServant::GetMINLPHessianStructure(ct::CapeLong, const ct::CapeArrayLong&,
+// 异常体逐个字面写出，不抽公共构造函数、也不复用 MINLPServant 的 throwNoHessian。
+// 这个参考实现存在的意义就是「另一侧不共享我们的假设」——共用一个构造器，两端
+// 就会一起对或一起错，测试也就验不出成员顺序写反这类问题。
+void RefCapeMINLPServant::GetMINLPHessianStructure(ct::CapeLong_out, ct::CapeArrayLong_out,
                                                    ct::CapeArrayLong_out) {
-    throw cm::ECapeHessianInfoNotAvailable("mock exposes no Hessian");
+    throw cm::ECapeHessianInfoNotAvailable(0, "mock exposes no Hessian",
+                                           "CAPEOPEN100::Business::Numeric::Minlp", "ICapeMINLP",
+                                           "GetMINLPHessianStructure", "");
 }
 void RefCapeMINLPServant::SetMINLPHessianValues(const ct::CapeArrayDouble&) {
-    throw cm::ECapeHessianInfoNotAvailable("mock exposes no Hessian");
+    throw cm::ECapeHessianInfoNotAvailable(0, "mock exposes no Hessian",
+                                           "CAPEOPEN100::Business::Numeric::Minlp", "ICapeMINLP",
+                                           "SetMINLPHessianValues", "");
 }
 void RefCapeMINLPServant::GetMINLPHessianValues(ct::CapeArrayDouble_out) {
-    throw cm::ECapeHessianInfoNotAvailable("mock exposes no Hessian");
+    throw cm::ECapeHessianInfoNotAvailable(0, "mock exposes no Hessian",
+                                           "CAPEOPEN100::Business::Numeric::Minlp", "ICapeMINLP",
+                                           "GetMINLPHessianValues", "");
 }
 
 // —— ICapeIdentification ——

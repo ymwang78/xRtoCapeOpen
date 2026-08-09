@@ -47,32 +47,34 @@
 //    module Business::Numeric::Minlp (35 operations)
 //      Optimisation_Interface_Specification.pdf, sections 3.6.1 / 3.6.2 /
 //      3.6.3 method tables. Each operation's [in]/[out] directions, types and
-//      raises clause were parsed out of that text by the generator.
+//      raises clause were parsed out of that text by the generator, then
+//      checked operation by operation against CAPE-OPENv1-0-0.tlb (below).
+//
+//    Cross-check against CO-LaN's own compiled artefact
+//      CAPE-OPENv1-0-0.tlb ships in the "CAPE-OPEN IDL" project, download 17,
+//      under CAPE-OPEN/Common/CAPE-OPEN/Type Libraries/. Its typelib name is
+//      CAPEOPEN100 and it carries the whole MINLP family. Comparing it with
+//      this file: same 32 ICapeMINLP operations, same order, same argument
+//      names throughout. Three arguments in the printed tables disagreed with
+//      it and the type library was followed -- see TLB_ARG_OVERRIDES in the
+//      generator. The type library is COM, so it says nothing about Repository
+//      IDs or exception bodies; those still rest on the sources above.
+//
+//    module Common::Error bodies
+//      Error Common Interface.pdf section 5.2.1, which specifies the CORBA
+//      translation directly: the abstract errors are dropped, each remaining
+//      error repeats "the state of all the parent errors ... according to the
+//      inheritance scheme", and `name` is deliberately left out because
+//      CORBA::UserException already carries it. Attribute names and types come
+//      from the section 3.3 tables.
 //
 //  KNOWN DEVIATIONS -- check these against the official .idl when it arrives
 //
-//    1. The exception *members* in module Common::Error are reconstructed, and
-//       this is the ACTIVE risk in this file -- read it before interoperating.
-//
-//       The Error specification section 3.3 gives the conceptual attributes
-//       (ECapeRoot.name plus ECapeUser.{code, description, scope,
-//       interfaceName, operation, moreInfo}) but not the exact CORBA IDL form,
-//       so the member list and order below are inferred. The uniform member set
-//       used here is also known to be incomplete: section 3.3 gives
-//       ECapeInvalidArgument an additional `position` attribute, which is not
-//       reproduced.
-//
-//       What that costs on the wire: a Repository ID does not depend on a
-//       raises clause, and successful calls are unaffected. But the servant
-//       does raise ECapeInvalidArgument (an out-of-range vid/cid, which a real
-//       solver will hit) and ECapeUnknown (any model-side failure), so this is
-//       a path clients exercise, not a theoretical one. If the official member
-//       layout differs, a client compiled from the official IDL decodes our
-//       exception body wrongly -- most likely surfacing as CORBA::MARSHAL
-//       instead of the clean "invalid argument" we meant to report.
-//
-//       Until the official .idl is available, treat a marshalling failure on an
-//       error path as this deviation until proven otherwise.
+//    1. Only nine of the twenty-three Common::Error exceptions are emitted --
+//       the ones the Minlp raises clauses actually name. The official file
+//       declares all twenty-three (section 5.2.1 counts them). This is a subset,
+//       not a divergence: a client compiled from the official IDL sees the same
+//       Repository ID and the same body for each exception present here.
 //
 //    2. The UNDEFINED constants of Common::Types are omitted. The document
 //       writes them in mathematical notation (e.g. -2^31), which is not legal
@@ -82,9 +84,15 @@
 //       ECapeUnkown -> ECapeUnknown, and ECapeT imeOut (a hard line break in
 //       the PDF) -> ECapeTimeOut.
 //
-//    4. GetMINLPHessianStructure takes rowindex as [in] and columnindex as
-//       [out]. The asymmetry looks wrong but matches the specification, so it
-//       is transcribed unchanged.
+//    4. Three arguments follow CAPE-OPENv1-0-0.tlb rather than the section 3.6
+//       tables, because the two disagree and the type library is the artefact
+//       CO-LaN generates from the same definitions the official .idl comes from:
+//         GetMINLPHessianStructure           size, rowindex: [in] -> [out]
+//         GetMINLPObjectiveFunctionIntegerAttribute   values -> value
+//       The Hessian asymmetry ([in] rowindex with [out] columnindex) had already
+//       been flagged here as looking wrong; the type library settles it. The
+//       generator refuses to emit if either correction stops matching, so the
+//       file cannot quietly revert.
 //
 //    5. The specification mentions "an Array type is also defined to hold
 //       sequences of these types" (of CapeMINLPObjFunType), but no method table
@@ -162,7 +170,6 @@ module CAPEOPEN100 {
     // exception repeats the full member set.
     module Error {
       exception ECapeUnknown {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -171,16 +178,15 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeInvalidArgument {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
         ::CAPEOPEN100::Common::Types::CapeString interfaceName;
         ::CAPEOPEN100::Common::Types::CapeString operation;
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
+        ::CAPEOPEN100::Common::Types::CapeShort position;
       };
       exception ECapeOutOfResources {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -189,7 +195,6 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeNoMemory {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -198,7 +203,6 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeTimeOut {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -207,7 +211,6 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeSolvingError {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -216,7 +219,6 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeLicenceError {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -225,7 +227,6 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeFailedInitialisation {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
@@ -234,13 +235,13 @@ module CAPEOPEN100 {
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
       };
       exception ECapeBadInvOrder {
-        ::CAPEOPEN100::Common::Types::CapeString name;
         ::CAPEOPEN100::Common::Types::CapeLong  code;
         ::CAPEOPEN100::Common::Types::CapeString description;
         ::CAPEOPEN100::Common::Types::CapeString scope;
         ::CAPEOPEN100::Common::Types::CapeString interfaceName;
         ::CAPEOPEN100::Common::Types::CapeString operation;
         ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
+        ::CAPEOPEN100::Common::Types::CapeString requestedOperation;
       };
 
     }; // END Error
@@ -277,12 +278,31 @@ module CAPEOPEN100 {
         enum CapeMINLPObjFunType { MAX, MIN };
 
         // Errors owned by Optimisation. The specification allows a CO interface
-        // to define its own errors within its own scope.
+        // to define its own errors within its own scope, and Error Common
+        // Interface.pdf section 5.2.1 counts exactly 23 exceptions in
+        // Common::Error -- the type library's error-code enumeration has 25
+        // entries, the extra two being these, which corroborates that they
+        // belong here and not there.
+        //
+        // The type library gives each of them the full ECapeUser attribute set
+        // (13 dispatch entries = 7 IUnknown/IDispatch + 6), so they carry the
+        // same body as every Common::Error exception.
         exception ECapeHessianInfoNotAvailable {
+          ::CAPEOPEN100::Common::Types::CapeLong  code;
           ::CAPEOPEN100::Common::Types::CapeString description;
+          ::CAPEOPEN100::Common::Types::CapeString scope;
+          ::CAPEOPEN100::Common::Types::CapeString interfaceName;
+          ::CAPEOPEN100::Common::Types::CapeString operation;
+          ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
         };
+
         exception ECapeOutsideSolverScope {
+          ::CAPEOPEN100::Common::Types::CapeLong  code;
           ::CAPEOPEN100::Common::Types::CapeString description;
+          ::CAPEOPEN100::Common::Types::CapeString scope;
+          ::CAPEOPEN100::Common::Types::CapeString interfaceName;
+          ::CAPEOPEN100::Common::Types::CapeString operation;
+          ::CAPEOPEN100::Common::Types::CapeURL   moreInfo;
         };
 
         // The operations below were generated from the section 3.6 method
@@ -359,7 +379,7 @@ module CAPEOPEN100 {
                    ::CAPEOPEN100::Common::Error::ECapeUnknown);
         void GetMINLPObjectiveFunctionBooleanAttribute(in ::CAPEOPEN100::Common::Types::CapeString attrib, out ::CAPEOPEN100::Common::Types::CapeBoolean value)
             raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
-        void GetMINLPObjectiveFunctionIntegerAttribute(in ::CAPEOPEN100::Common::Types::CapeString attrib, out ::CAPEOPEN100::Common::Types::CapeLong values)
+        void GetMINLPObjectiveFunctionIntegerAttribute(in ::CAPEOPEN100::Common::Types::CapeString attrib, out ::CAPEOPEN100::Common::Types::CapeLong value)
             raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
         void GetMINLPObjectiveFunctionDoubleAttribute(in ::CAPEOPEN100::Common::Types::CapeString attrib, out ::CAPEOPEN100::Common::Types::CapeDouble value)
             raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
@@ -372,7 +392,7 @@ module CAPEOPEN100 {
             raises(::CAPEOPEN100::Common::Error::ECapeInvalidArgument,
                    ::CAPEOPEN100::Common::Error::ECapeUnknown,
                    ::CAPEOPEN100::Common::Error::ECapeFailedInitialisation);
-        void GetMINLPHessianStructure(in ::CAPEOPEN100::Common::Types::CapeLong size, in ::CAPEOPEN100::Common::Types::CapeArrayLong rowindex, out ::CAPEOPEN100::Common::Types::CapeArrayLong columnindex)
+        void GetMINLPHessianStructure(out ::CAPEOPEN100::Common::Types::CapeLong size, out ::CAPEOPEN100::Common::Types::CapeArrayLong rowindex, out ::CAPEOPEN100::Common::Types::CapeArrayLong columnindex)
             raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
                    ECapeHessianInfoNotAvailable);
         void SetMINLPHessianValues(in ::CAPEOPEN100::Common::Types::CapeArrayDouble values)
