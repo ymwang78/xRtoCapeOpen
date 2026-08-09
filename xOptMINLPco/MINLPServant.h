@@ -21,11 +21,15 @@
 //     本类是这条边界的生产端：入网 vids/cids 减一，出网结构索引加一。
 //     详见 CapeCorbaMarshal.h 顶部。
 //
-//  未实现的方法（属性族、变量类型/约束线性性、Hessian、Lagrange）一律抛
-//  CORBA::NO_IMPLEMENT：它是系统异常，无需出现在 IDL 的 raises 子句里，
-//  且语义准确——「这个操作我没实现」，而不是「调用失败了」。
-//  ICapeMINLPModel 抽象里没有这些概念，硬造一个空返回会让求解器以为
-//  拿到了真实答案。
+//  未实现的方法分两类，都不返回空值冒充真答案——ICapeMINLPModel 抽象里没有
+//  这些概念，硬造一个 0 会让求解器以为拿到了真实结果：
+//
+//    - 属性族、变量类型/约束线性性、Lagrange：抛 CORBA::NO_IMPLEMENT。系统
+//      异常，无需出现在 IDL 的 raises 子句里，语义也准确——「这个操作我没
+//      实现」，而不是「调用失败了」。
+//    - Hessian 三件套：抛 ECapeHessianInfoNotAvailable。规范为此专设了这个
+//      用户异常，三个方法的 raises 子句都声明了它，比 NO_IMPLEMENT 更贴合
+//      「Hessian 信息拿不到」。异常体与 Common::Error 同构（见 throwNoHessian）。
 //
 //  编译需 WIN32/ACE_AS_STATIC_LIBS/TAO_AS_STATIC_LIBS（由 capeopen_corba 传递）。
 // ***************************************************************

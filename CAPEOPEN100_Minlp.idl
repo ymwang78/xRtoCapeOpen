@@ -164,10 +164,17 @@ module CAPEOPEN100 {
 
     }; // END Types
 
-    // Source: Error Common Interface.pdf section 3.3. Members are reconstructed
-    // -- see deviation 1 in the file header. CORBA exceptions do not support
-    // inheritance (that specification says so in section 5.2.1), so each
-    // exception repeats the full member set.
+    // Source: Error Common Interface.pdf. Section 5.2.1 gives the CORBA
+    // translation rule -- CORBA exceptions do not support inheritance, so the
+    // abstract errors are dropped and each concrete exception repeats "the
+    // state of all the parent errors ... according to the inheritance scheme";
+    // the same section drops `name`, which CORBA::UserException already carries.
+    // Section 3.3 supplies the attribute names, types and order per class.
+    //
+    // What is still inferred: where an inherited extra member sits relative to
+    // the six from ECapeUser. Ancestor-first is assumed, so ECapeUser's six come
+    // first and the nearer parent's member last. CDR is positional, so if the
+    // official file orders them the other way a client decodes the tail wrongly.
     module Error {
       exception ECapeUnknown {
         ::CAPEOPEN100::Common::Types::CapeLong  code;

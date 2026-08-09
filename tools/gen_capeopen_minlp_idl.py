@@ -64,15 +64,22 @@ ERR_COMMON = ['ECapeUnknown', 'ECapeInvalidArgument', 'ECapeOutOfResources', 'EC
 # Hence ECapeUser's six attributes are flattened into every exception and `name`
 # is deliberately absent -- CORBA::UserException / org.omg.CORBA.UserException
 # already carry it, which is exactly the reason the specification gives.
+#
+# The order below is section 3.3.2's own attribute table, transcribed rather
+# than chosen. CDR is positional, so this matters.
 ERR_MEMBERS = [('CapeLong', 'code'), ('CapeString', 'description'),
                ('CapeString', 'scope'), ('CapeString', 'interfaceName'),
                ('CapeString', 'operation'), ('CapeURL', 'moreInfo')]
 
 # The "state of all the parent errors" that section 5.2.1 requires each exception
-# to repeat. Every intermediate error on the paths down from ECapeUser has
-# "Attributes: None" in section 3.3, so this is the complete list:
-#   ECapeInvalidArgument <- ECapeBadArgument   (3.3.8,  position : CapeShort)
-#   ECapeBadInvOrder      declares its own     (3.3.20, requestedOperation)
+# to repeat, beyond ECapeUser's six.
+#
+# Walking section 3.3 for the nine exceptions emitted here: ECapeBadArgument is
+# the only ancestor of any of them that declares state of its own (3.3.8,
+# position : CapeShort, inherited by ECapeInvalidArgument). Every other error on
+# those paths -- ECapeData, ECapeImplementation, ECapeComputation -- is
+# "Attributes: None". ECapeBadInvOrder's requestedOperation is not inherited at
+# all; 3.3.20 declares it on ECapeBadInvOrder itself.
 ERR_EXTRA_MEMBERS = {
     'ECapeInvalidArgument': [('CapeShort', 'position')],
     'ECapeBadInvOrder': [('CapeString', 'requestedOperation')],
@@ -442,10 +449,17 @@ module CAPEOPEN100 {
 
     }; // END Types
 
-    // Source: Error Common Interface.pdf section 3.3. Members are reconstructed
-    // -- see deviation 1 in the file header. CORBA exceptions do not support
-    // inheritance (that specification says so in section 5.2.1), so each
-    // exception repeats the full member set.
+    // Source: Error Common Interface.pdf. Section 5.2.1 gives the CORBA
+    // translation rule -- CORBA exceptions do not support inheritance, so the
+    // abstract errors are dropped and each concrete exception repeats "the
+    // state of all the parent errors ... according to the inheritance scheme";
+    // the same section drops `name`, which CORBA::UserException already carries.
+    // Section 3.3 supplies the attribute names, types and order per class.
+    //
+    // What is still inferred: where an inherited extra member sits relative to
+    // the six from ECapeUser. Ancestor-first is assumed, so ECapeUser's six come
+    // first and the nearer parent's member last. CDR is positional, so if the
+    // official file orders them the other way a client decodes the tail wrongly.
     module Error {
 '''
 

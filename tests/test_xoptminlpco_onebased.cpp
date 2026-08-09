@@ -232,6 +232,46 @@ TEST_F(OneBasedWireTest, UnimplementedMethodsSaySoRatherThanFakeAnAnswer) {
                  CORBA::NO_IMPLEMENT);
 }
 
+// ECapeHessianInfoNotAvailable 的体从 1 个字段扩到了 6 个（官方类型库给它完整的
+// ECapeUser 属性集）。只断言异常类型的话，这五个新字段全空也照样绿——而
+// interfaceName / operation 按规范 §3.3 是必填，PME 靠它们定位问题。
+//
+// 三个 Hessian 方法共用 throwNoHessian，所以逐个查 operation：写死一个操作名
+// 是这里最容易犯的错，而单测一个方法看不出来。
+TEST_F(OneBasedWireTest, HessianErrorCarriesTheMandatoryFieldsPerOperation) {
+    auto operation_of = [](auto&& call) -> std::string {
+        try {
+            call();
+        } catch (const cm::ECapeHessianInfoNotAvailable& e) {
+            EXPECT_STREQ(e.interfaceName.in(), "ICapeMINLP");
+            EXPECT_STREQ(e.scope.in(), "CAPEOPEN100::Business::Numeric::Minlp");
+            EXPECT_STRNE(e.description.in(), "") << "description 不能为空";
+            return std::string(e.operation.in());
+        }
+        ADD_FAILURE() << "Hessian 调用竟然没有报错";
+        return {};
+    };
+
+    EXPECT_EQ(operation_of([&] {
+                  CORBA::Long sz;
+                  ct::CapeArrayLong_var r, c;
+                  minlp_->GetMINLPHessianStructure(sz, r.out(), c.out());
+              }),
+              "GetMINLPHessianStructure");
+
+    EXPECT_EQ(operation_of([&] {
+                  ct::CapeArrayDouble empty;
+                  minlp_->SetMINLPHessianValues(empty);
+              }),
+              "SetMINLPHessianValues");
+
+    EXPECT_EQ(operation_of([&] {
+                  ct::CapeArrayDouble_var v;
+                  minlp_->GetMINLPHessianValues(v.out());
+              }),
+              "GetMINLPHessianValues");
+}
+
 // 变量类型/约束线性性不再抛 NO_IMPLEMENT：GetMINLPSize 已上报 niv=0 / nlc=0，
 // 所以「全连续」「全非线性」是从已上报值推导出来的，不是编造。
 // 很多求解器会无条件查这两项，抛异常会让它们直接中止。

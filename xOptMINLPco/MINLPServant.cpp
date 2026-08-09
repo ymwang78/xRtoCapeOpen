@@ -51,9 +51,14 @@ namespace ct = ::CAPEOPEN100::Common::Types;
         /*position*/ arg_position);
 }
 
+// arg_position 刻意**没有默认值**：它对 ICapeMINLP 里绝大多数操作是 1，但
+// GetMINLPConstraintDerivativeValues 的 cids 排在 structtype 之后是 2，而
+// GetMINLPLagrangeMultipliers 的 ids 同样在第 2 位（目前还是 NO_IMPLEMENT，
+// 将来补校验时会走到这里）。给个默认值就等于给那两个留了个静默报错的坑，
+// 而且报出来的 position 是「看着像对的」错值，最难发现。
 std::vector<int> wireIdsToInternal(const ct::CapeArrayLong& wire, int count,
                                    const char* operation, const char* id_kind,
-                                   CORBA::Short arg_position = 1) {
+                                   CORBA::Short arg_position) {
     std::vector<int> ids;
     indicesFromWire(wire, ids);
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -145,7 +150,7 @@ void MINLPServant::GetMINLPStructure(const char* structuretype, ct::CapeArrayLon
 
 void MINLPServant::GetMINLPVariableNames(const ct::CapeArrayLong& vids,
                                          ct::CapeArrayString_out vnames) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableNames"), "GetMINLPVariableNames", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableNames"), "GetMINLPVariableNames", "vids", 1);
     std::vector<std::string> names;
     if (model_->getVariableNames(ids, names) < 0)
         throwUnknown("GetMINLPVariableNames", "the model rejected getVariableNames");
@@ -164,7 +169,7 @@ void MINLPServant::GetMINLPVariableTypes(const ct::CapeArrayLong& vids,
     const CapeMINLPSize s = sizeOf(model_, "GetMINLPVariableTypes");
     if (s.num_integer_variables != 0) throw CORBA::NO_IMPLEMENT();
     const std::vector<int> ids =
-        wireIdsToInternal(vids, s.num_variables, "GetMINLPVariableTypes", "vids");
+        wireIdsToInternal(vids, s.num_variables, "GetMINLPVariableTypes", "vids", 1);
     const size_t n = ids.empty() ? static_cast<size_t>(s.num_variables) : ids.size();
     isinteger = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
@@ -195,7 +200,7 @@ void MINLPServant::GetMINLPVariableStringAttribute(const ct::CapeArrayLong& /*vi
 
 void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out LB, ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableBounds"), "GetMINLPVariableBounds", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableBounds"), "GetMINLPVariableBounds", "vids", 1);
     std::vector<double> lo, hi;
     if (model_->getVariableBounds(ids, lo, hi) < 0)
         throwUnknown("GetMINLPVariableBounds", "the model rejected getVariableBounds");
@@ -205,7 +210,7 @@ void MINLPServant::GetMINLPVariableBounds(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableValues"), "GetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "GetMINLPVariableValues"), "GetMINLPVariableValues", "vids", 1);
     std::vector<double> v;
     if (model_->getVariableValues(ids, v) < 0)
         throwUnknown("GetMINLPVariableValues", "the model rejected getVariableValues");
@@ -214,7 +219,7 @@ void MINLPServant::GetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
                                           const ct::CapeArrayDouble& values) {
-    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "SetMINLPVariableValues"), "SetMINLPVariableValues", "vids");
+    const std::vector<int> ids = wireIdsToInternal(vids, variableCount(model_, "SetMINLPVariableValues"), "SetMINLPVariableValues", "vids", 1);
     std::vector<double> v;
     fromDoubleSeq(values, v);
     if (model_->setVariableValues(ids, v) < 0)
@@ -225,7 +230,7 @@ void MINLPServant::SetMINLPVariableValues(const ct::CapeArrayLong& vids,
 
 void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
                                            ct::CapeArrayString_out cnames) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintNames"), "GetMINLPConstraintNames", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintNames"), "GetMINLPConstraintNames", "cids", 1);
     std::vector<std::string> names;
     if (model_->getConstraintNames(ids, names) < 0)
         throwUnknown("GetMINLPConstraintNames", "the model rejected getConstraintNames");
@@ -235,7 +240,7 @@ void MINLPServant::GetMINLPConstraintNames(const ct::CapeArrayLong& cids,
 void MINLPServant::GetMINLPConstraintBounds(const ct::CapeArrayLong& cids,
                                             ct::CapeArrayDouble_out LB,
                                             ct::CapeArrayDouble_out UB) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintBounds"), "GetMINLPConstraintBounds", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPConstraintBounds"), "GetMINLPConstraintBounds", "cids", 1);
     std::vector<double> lo, hi;
     if (model_->getConstraintBounds(ids, lo, hi) < 0)
         throwUnknown("GetMINLPConstraintBounds", "the model rejected getConstraintBounds");
@@ -250,7 +255,7 @@ void MINLPServant::GetMINLPConstraintLinearity(const ct::CapeArrayLong& cids,
     const CapeMINLPSize s = sizeOf(model_, "GetMINLPConstraintLinearity");
     if (s.num_linear_constraints != 0) throw CORBA::NO_IMPLEMENT();
     const std::vector<int> ids =
-        wireIdsToInternal(cids, s.num_constraints, "GetMINLPConstraintLinearity", "cids");
+        wireIdsToInternal(cids, s.num_constraints, "GetMINLPConstraintLinearity", "cids", 1);
     const size_t n = ids.empty() ? static_cast<size_t>(s.num_constraints) : ids.size();
     islinear = new ct::CapeArrayBoolean(toBooleanSeq(std::vector<bool>(n, false)));
 }
@@ -281,7 +286,7 @@ void MINLPServant::GetMINLPConstraintStringAttribute(const ct::CapeArrayLong& /*
 
 void MINLPServant::GetMINLPNonlinearConstraintValues(const ct::CapeArrayLong& cids,
                                                      ct::CapeArrayDouble_out values) {
-    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPNonlinearConstraintValues"), "GetMINLPNonlinearConstraintValues", "cids");
+    const std::vector<int> ids = wireIdsToInternal(cids, constraintCount(model_, "GetMINLPNonlinearConstraintValues"), "GetMINLPNonlinearConstraintValues", "cids", 1);
     std::vector<double> v;
     if (model_->getNonlinearConstraintValues(ids, v) < 0)
         throwUnknown("GetMINLPNonlinearConstraintValues", "the model rejected getNonlinearConstraintValues");

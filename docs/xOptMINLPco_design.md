@@ -360,9 +360,10 @@ are numbered starting from 1」写在接口规范里、**与绑定无关**，所
 
 | 风险 | 状态 | 影响 |
 |------|------|------|
-| ~~重建的 `Common::Error` 异常成员未核对~~ | ✅ 已解决 | 见下 |
+| 异常体成员**集合**（含 `name` 的取舍）无据 | ✅ 已解决 | 见下——§5.2.1 是明文规则 |
+| 异常体成员**次序**未与官方 IDL 核对 | 🟡 已大幅收窄 | 见下——CDR 按位置解码，仍是唯一的编解码风险 |
 | ~~COM 绑定仍 0-based~~ | ✅ 已修 | §6.5（issue #2） |
-| ~~未经第三方 ORB 实测~~ | ✅ 已验证 | 见下 |
+| ~~未经第三方 ORB 实测~~ | ✅ 已验证 | 见下（注意它证的是协议互通，不是与官方 IDL 一致） |
 | 能力上是 NLP-only，非完整 MINLP | 🟡 需明示 | §6.4 |
 | 无 MINLP 专用组件类别 | 🟡 规范所限 | §6.7——规范里就没有，已注册通用类别；非我方缺失 |
 
@@ -378,8 +379,18 @@ CORBA 形式」。这个前提是错的——`Error Common Interface.pdf` **§5.
 于是原来那份「统一 7 成员含 `name`」有两处错：`name` 根本不该出现（`CORBA::UserException`
 自带 Repository ID，这正是规范给的理由），而父错误的状态该平摊进来却没有。现在的 body 是
 `ECapeUser` 的 6 个成员，加上 `ECapeInvalidArgument` 的 `position`（来自 `ECapeBadArgument`
-§3.3.8）和 `ECapeBadInvOrder` 的 `requestedOperation`（§3.3.20）。§3.3 逐条核过，
-`ECapeUser` 往下的中间层错误全都是 "Attributes: None"，所以这两个就是全部。
+§3.3.8）和 `ECapeBadInvOrder` 的 `requestedOperation`（§3.3.20）。
+
+**这两个额外成员为什么就是全部**：按 §3.3 走一遍本文件发射的那 9 个异常的继承链，
+祖先里唯一自带状态的是 `ECapeBadArgument`（`position`，由 `ECapeInvalidArgument` 继承）；
+其余经过的 `ECapeData` / `ECapeImplementation` / `ECapeComputation` 都是 "Attributes: None"。
+`ECapeBadInvOrder` 的 `requestedOperation` 不是继承来的，§3.3.20 就写在它自己身上。
+（先前这里写成「中间层错误全都是 Attributes: None」，与紧接着引用的
+`ECapeBadArgument.position` 自相矛盾；IDL 体是对的，是这句话写错了。）
+
+**仍然存疑的是次序，不是集合**：6 个成员的相对顺序照抄 §3.3.2 的属性表，有据；但
+`position` 相对那 6 个放在哪，规范没写，这里按「祖先在前」推断为放在末尾。CDR 是按位置
+解码的，若官方 IDL 反过来，客户端会把尾部解错。这是本文件目前唯一真正的编解码风险。
 
 **同时用官方类型库交叉核对了操作签名**：CO-LaN 自己编译发布的 `CAPE-OPENv1-0-0.tlb`
 （"CAPE-OPEN IDL" 项目下载项 17）含完整 MINLP 接口族，类型库名就叫 `CAPEOPEN100`。
@@ -398,9 +409,15 @@ Wireshark 对同一次会话的抓包**零配置**即解析出 `GIOP 1.2 Request
 与 `giop.exceptionid: IDL:CAPEOPEN100/Common/Error/ECapeInvalidArgument:1.0`；JacORB 的
 `PrintIOR` 解我们的 IOR，连 `TAG_ORB_TYPE` 都认出是 TAO。
 
+**跨 ORB 通过证明了什么、没证明什么**：JacORB 用的是**我们这份**重建 IDL 编出来的桩，两端
+因此共享同一套成员布局。所以它证明的是——线上格式是标准 GIOP、RID 推导与独立实现一致、
+异常在 IDL 声明的 raises 里正确编解码、1-based 边界从外部观察正确。它**证不了**我们的布局
+与官方 `CAPE-OPENv1-0-0.idl` 一致；一个按官方 IDL 编译的客户端仍可能在次序上解错。
+关掉「成员集合」那条风险的是 §5.2.1 这份规范条文，不是 JacORB。
+
 仍然拿不到官方 `CAPE-OPENv1-0-0.idl`（CO-LaN 的下载区只有文档集与 COM 类型库，没有 IDL），
-所以 issue #3 不关；但它现在的剩余内容只是「取得权威原件以求完备」，不再是错误路径上的
-活跃风险。
+所以 issue #3 不关。它的剩余内容收窄为两点：取得权威原件以求完备，以及核对上面那条
+成员次序——后者是唯一还可能在错误路径上真出问题的地方。
 
 ### 6.7 组件类别注册（issue #5）：**规范里没有 MINLP 类别**
 
