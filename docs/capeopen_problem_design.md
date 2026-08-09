@@ -46,10 +46,14 @@ CAPE-OPEN MINLP 标准里两个接口职责不同：
 
 ### 2.2 现有 `xRtoCapeOpen` 内容与方向差异
 
-- [`SqpSolver.idl`](../SqpSolver.idl) + [`SqpcSovlerImpl.cpp`](../SqpcSovlerImpl.cpp)：当前实现的是
+- [`SqpSolver.idl`](../SqpSolver.idl) + `SqpcSovlerImpl.cpp`：本工程最初实现的是
   **求解器服务端**（本工程当 `ICapeMINLPSystem` servant，经 TAO/ACE 反向回调外部 `ICapeMINLP` 模型）。
   方向与本任务**相反**。IDL 中对 `ICapeMINLP` 的数据/方法定义可作为映射参考，但求解器 servant 代码
-  与新方向无关，建议后续迁出为独立示例（见 §8 M4）。
+  与新方向无关。
+  **已删除（§8 M5）**：`SqpcSovlerImpl.cpp`、`dllmain.cpp`、`SqpSolverC/S.{cpp,h,inl}`、
+  `RtoCapeOpen.vcxproj`，以及仅由旧根 target 使用的 `cmake/Modules/Find{ACE,TAO}.cmake`；
+  仓库根 `CMakeLists.txt` 改为只 `add_subdirectory(xOptMINLPco)` 的聚合器。
+  `SqpSolver.idl` 保留作接口对照（§6.2 的 17 vs 32 操作缺口即以它为准）。
 
 ### 2.3 xOpt 既有的两条黑箱通路（决定 v2 方案）
 
@@ -477,8 +481,11 @@ worker：**创建 COM 对象的线程须与调用 evaluate 的线程一致**，�
   这条因此变得有意义了；`option(CAPEOPEN_SINGLE_DLL)` 合编。
 
 **M5 — 收尾**
-- 文档补充整数松弛限制、线程套间约束、`size` 升级规范；把旧 `SqpcSovlerImpl.cpp` 求解器 servant
-  迁出为独立示例或归档。
+- 文档补充整数松弛限制、线程套间约束、`size` 升级规范。
+- [x] 旧 `SqpcSovlerImpl.cpp` 求解器 servant 已**归档删除**（连同 `SqpSolverC/S.*`、`dllmain.cpp`、
+  `RtoCapeOpen.vcxproj`、`cmake/Modules/Find{ACE,TAO}.cmake`）：无任何 target/进程消费它，
+  RID `IDL:SqpSolver/ICapeMINLP:1.0` 与规范不符（§6.1），方法体全是空壳。仓库根
+  `CMakeLists.txt` 改为聚合器（`add_subdirectory(xOptMINLPco)`），`SqpSolver.idl` 保留作对照。
 
 > 关键路径在 **M2**（零外部依赖即可验证整条黑箱通路 + 后端无关核心）。**M3/M4** 是两套绑定的真实落地，
 > 因共享 `CapeMINLPProblemCore`，第二个后端的增量成本主要是 marshaling + 连接生命周期。

@@ -1,63 +1,25 @@
-﻿cmake_minimum_required(VERSION 3.10)
-project(RtoCapeOpen)
+﻿# ***************************************************************
+#  xRtoCapeOpen —— 仓库根聚合器
+#
+#  这里不定义任何 target，只把构建入口收敛到 xOptMINLPco/：
+#  它自己 add_subdirectory(../core)，于是 `cmake -S .` 与既有的
+#  `cmake -S xOptMINLPco` 产出完全一致的构建树。
+#
+#  历史：本文件原先构建一个 SHARED target `RtoCapeOpen`（SqpSolver.idl
+#  的求解器侧 servant，SqpcSovlerImpl.cpp）。该通路已废弃——MINLP 走
+#  官方模块路径的 CAPEOPEN100_Minlp.idl（见 core/CMakeLists.txt 与
+#  docs/xOptMINLPco_design.md §6），自造的 `IDL:SqpSolver/ICapeMINLP:1.0`
+#  与规范不符，且 servant 各方法体本就是空壳。target 与其源文件、
+#  仅它使用的 cmake/Modules/Find{ACE,TAO}.cmake 一并删除。
+#  SqpSolver.idl 保留：docs 引它作接口对照。
+#
+#  注意：core 自己的单测（test_capeopen_problem / test_capeopen_corba /
+#  test_capeopen100_rid）不在这里构建——xOptMINLPco 会 FORCE 掉
+#  CAPEOPEN_CORE_BUILD_TESTS。要跑它们，单独 `cmake -S core`。
+# ***************************************************************
+cmake_minimum_required(VERSION 3.10)
+project(xRtoCapeOpen CXX)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules")
+enable_testing()
 
-set(IDL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/SqpSolver.idl)
-set(GENERATED_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-
-# 创建生成目录
-file(MAKE_DIRECTORY ${GENERATED_DIR})
-
-# 添加自定义命令，调用 tao_idl 生成服务器端文件
-# 这里假设生成的文件包含 SqpSolverS.cpp 和 SqpSolverS.h，如有需要可根据实际情况调整
-add_custom_command(
-    OUTPUT ${GENERATED_DIR}/SqpSolverS.cpp ${GENERATED_DIR}/SqpSolverS.h
-    COMMAND tao_idl -o ${GENERATED_DIR} ${IDL_FILE}
-    DEPENDS ${IDL_FILE}
-    COMMENT "Generating server stubs from SqpSolver.idl"
-)
-cmake_policy(SET CMP0074 NEW)
-
-# 将生成的源文件添加到源文件列表中
-set(GENERATED_SOURCES
-    ${GENERATED_DIR}/SqpSolverS.cpp
-)
-
-# 你自己的源文件
-set(MY_SOURCES SqpcSovlerImpl.cpp)
-
-# 合并所有源文件
-set(SOURCES ${MY_SOURCES} ${GENERATED_SOURCES})
-
-# 将生成目录添加到 include 路径中，这样 SqpSolverS.h 能够被正确引用
-include_directories(${GENERATED_DIR})
-
-# 添加共享库 target (在 Linux 下生成 libRtoCapeOpen.so, 你可以修改目标名称以生成 RtoCapeOpen.so)
-add_library(RtoCapeOpen SHARED ${SOURCES})
-
-message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
-
-# 查找 TAO 和 ACE（前提是它们已安装并能被 find_package 找到）
-find_package(ACE REQUIRED)
-message(STATUS "ACE_FOUND: ${ACE_FOUND}")
-message(STATUS "ACE_INCLUDE_DIR: ${ACE_INCLUDE_DIR}")
-message(STATUS "ACE_INCLUDE_DIRS: ${ACE_INCLUDE_DIRS}")
-message(STATUS "ACE_LIBRARY: ${ACE_LIBRARY}")
-message(STATUS "ACE_LIBRARIES: ${ACE_LIBRARIES}")
-
-find_package(TAO REQUIRED)
-
-message(STATUS "TAO_FOUND: ${TAO_FOUND}")
-message(STATUS "TAO_INCLUDE_DIR: ${TAO_INCLUDE_DIR}")
-message(STATUS "TAO_INCLUDE_DIRS: ${TAO_INCLUDE_DIRS}")
-message(STATUS "TAO_LIBRARY: ${TAO_LIBRARY}")
-message(STATUS "TAO_LIBRARIES: ${TAO_LIBRARIES}")
-
-# 添加 TAO 和 ACE 的 include 目录
-target_include_directories(RtoCapeOpen PRIVATE ${TAO_INCLUDE_DIRS} ${ACE_INCLUDE_DIRS})
-
-# 链接 TAO 和 ACE 库
-target_link_libraries(RtoCapeOpen ${TAO_LIBRARIES} ${ACE_LIBRARIES})
+add_subdirectory(xOptMINLPco)
