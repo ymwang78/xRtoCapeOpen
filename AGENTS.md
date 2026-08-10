@@ -32,9 +32,10 @@ On Linux (this VM) only the transport-agnostic pieces build:
 - `capeopen_core` (mock backend) + `test_capeopen_problem` (16 tests).
 - `xoptminlpco` adapter + `test_xoptminlpco_adapter`, `test_xoptminlpco_capi`.
 
-Windows-only / not buildable here: the COM backend, the CORBA/TAO backend, `xOptMINLPco.dll`,
-`xOptMINLPcoCorbaServer.exe`, and the legacy root `RtoCapeOpen` target (needs ACE **and** TAO;
-TAO is not apt-packaged on Ubuntu). Their CMake options default OFF on non-WIN32.
+Windows-only / not buildable here: the COM backend, the CORBA/TAO backend, `xOptMINLPco.dll`
+and `xOptMINLPcoCorbaServer.exe` (they need ACE **and** TAO; TAO is not apt-packaged on
+Ubuntu). Their CMake options are guarded by `if(WIN32)` and forced OFF otherwise, so they
+simply drop out of the build rather than failing to configure.
 
 ### Build & test (Linux)
 ```bash
@@ -52,9 +53,25 @@ cmake --build xOptMINLPco/build -j"$(nproc)"
 (cd xOptMINLPco/build && ctest --output-on-failure)
 ```
 
-### Lint
-No linter/formatter is configured (no `.clang-format`/`.clang-tidy`). Treat a warning-clean
-`g++ -Wall -Wextra` build as the lint bar; only benign `-Wunused-parameter` warnings exist today.
+### Style and lint
+This repo carries no `.clang-format`/`.clang-tidy` of its own, but that does **not** mean there
+is no style. Both live in the parent monorepo `ymwang78/zd-cxxproj`, whose `.clang-format` sits
+at its root — one level above where this slice normally lives (`libsrc/xRtoCapeOpen`). In a
+standalone checkout that file is absent, so running `clang-format` here silently falls back to
+LLVM defaults and reformats everything wrongly. Fetch the parent's `.clang-format` (the same
+place the xOpt headers come from) before formatting, or do not format at all.
+
+Conventions the parent repo mandates, none of them clang-format's defaults:
+- Classes `PascalCase`, functions `camelCase`, variables `snake_case`, members `snake_case_`.
+- Tests use GTest, files named `test_*.cpp`, and any `main` wrapped in `#ifndef USE_GTEST_MAIN`.
+- **All `.c/.cpp/.h/.hpp` are UTF-8 *with BOM*.** This is not cosmetic. The sources carry
+  Chinese comments; strip the BOM and MSVC reads them as the local ANSI codepage (CP936), where
+  a trailing byte of a multi-byte character can pair with the newline and swallow the following
+  line into the comment. The failure surfaces as a syntax error on a line that looks fine.
+  Editors and scripts that rewrite whole files are the usual culprit — check the BOM survived.
+
+Beyond that, treat a warning-clean `g++ -Wall -Wextra` build as the bar; only benign
+`-Wunused-parameter` warnings exist today.
 
 ### IDL regeneration (maintainer tool, optional)
 `tools/gen_capeopen_minlp_idl.py` regenerates `CAPEOPEN100_Minlp.idl` from CAPE-OPEN PDFs
