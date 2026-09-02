@@ -218,31 +218,74 @@ int CapeMINLPProblemCore::initialize() {
 // 那一头的问题对象。
 int CapeMINLPProblemCore::refresh() {
     if (!model_ || !initialized_) return -1;
-    return readStructure();
+    if (readStructure() < 0) {
+        // 读失败不改缓存（readStructure 是事务式的），所以这里留下的是一份
+        // **旧问题**的完整结构——自洽，但已经不是远端那个问题了。标记为陈旧，
+        // 让所有读取都失败：安静地按旧结构解下去，比报错难查得多。
+        structure_stale_ = true;
+        return -1;
+    }
+    structure_stale_ = false;
+    return 0;
 }
 
+// 事务式：全部读进局部量，**最后一次性提交**。中途失败一个字节都不改。
+//
+// 过去是直接往成员上写——先 size_，再逐项覆盖名称/界/结构。getVariableNames
+// 半路 COMM_FAILURE 的话，留下的是"规模已是新的、名字还是旧的"混合缓存，而
+// getVariableNames() 按 size_.num_variables 遍历 var_names_ —— 越界读。
+// 组分从 2 个变 3 个时新规模 4、旧数组 3 项，正好踩中。
 int CapeMINLPProblemCore::readStructure() {
-    if (model_->getSize(size_) < 0) return -1;
+    CapeMINLPSize size{};
+    if (model_->getSize(size) < 0) return -1;
 
-    const std::vector<int> vids = allVariableIds();
-    const std::vector<int> cids = allConstraintIds();
+    std::vector<int> vids(static_cast<size_t>(std::max(size.num_variables, 0)));
+    std::vector<int> cids(static_cast<size_t>(std::max(size.num_constraints, 0)));
+    for (size_t i = 0; i < vids.size(); ++i) vids[i] = static_cast<int>(i);
+    for (size_t i = 0; i < cids.size(); ++i) cids[i] = static_cast<int>(i);
 
-    if (model_->getVariableNames(vids, var_names_) < 0) return -1;
-    if (model_->getVariableBounds(vids, var_lower_, var_upper_) < 0) return -1;
-    if (model_->getVariableValues(vids, initial_x_) < 0) return -1;
-    if (model_->getConstraintNames(cids, con_names_) < 0) return -1;
-    if (model_->getConstraintBounds(cids, con_lower_, con_upper_) < 0) return -1;
+    std::vector<std::string> var_names, con_names;
+    std::vector<double> var_lower, var_upper, initial_x, con_lower, con_upper;
+    std::vector<int> jac_rowidx, jac_colidx, objgrad_colidx;
+
+    if (model_->getVariableNames(vids, var_names) < 0) return -1;
+    if (model_->getVariableBounds(vids, var_lower, var_upper) < 0) return -1;
+    if (model_->getVariableValues(vids, initial_x) < 0) return -1;
+    if (model_->getConstraintNames(cids, con_names) < 0) return -1;
+    if (model_->getConstraintBounds(cids, con_lower, con_upper) < 0) return -1;
 
     // 一次性拉取并缓存稀疏结构，之后两段式查询从缓存返回（design §6.1）
     std::vector<int> obj_unused;
-    if (model_->getStructure(cape::kStructJacobian, jac_rowidx_, jac_colidx_, obj_unused) < 0) {
+    if (model_->getStructure(cape::kStructJacobian, jac_rowidx, jac_colidx, obj_unused) < 0) {
         return -1;
     }
     std::vector<int> row_unused, col_unused;
     if (model_->getStructure(cape::kStructObjectiveGradient, row_unused, col_unused,
-                             objgrad_colidx_) < 0) {
+                             objgrad_colidx) < 0) {
         return -1;
     }
+
+    // 后端可以只答一部分吗？不行——访问器按 size_ 遍历这些数组，长度对不上
+    // 就是越界。在提交前挡住，比在读取时崩掉好查。
+    if (var_names.size() != vids.size() || var_lower.size() != vids.size() ||
+        var_upper.size() != vids.size() || initial_x.size() != vids.size() ||
+        con_names.size() != cids.size() || con_lower.size() != cids.size() ||
+        con_upper.size() != cids.size()) {
+        return -1;
+    }
+
+    // —— 到这里才动成员：以下不再有失败点 ——
+    size_ = size;
+    var_names_ = std::move(var_names);
+    var_lower_ = std::move(var_lower);
+    var_upper_ = std::move(var_upper);
+    initial_x_ = std::move(initial_x);
+    con_names_ = std::move(con_names);
+    con_lower_ = std::move(con_lower);
+    con_upper_ = std::move(con_upper);
+    jac_rowidx_ = std::move(jac_rowidx);
+    jac_colidx_ = std::move(jac_colidx);
+    objgrad_colidx_ = std::move(objgrad_colidx);
 
     // 规模可能变了，setX 的缓冲跟着重开；x_set_ 归位，因为旧的那个点已经
     // 不属于这个问题了——继续拿它求值会静默地算错。
@@ -276,12 +319,12 @@ void CapeMINLPProblemCore::fillVtable(xOptProblemT* problem) {
     problem->evaluateConstraintsJacobianValues = &t_evaluateConstraintsJacobianValues;
 }
 
-int CapeMINLPProblemCore::numVariables() const { return initialized_ ? size_.num_variables : -1; }
+int CapeMINLPProblemCore::numVariables() const { return usable() ? size_.num_variables : -1; }
 
-int CapeMINLPProblemCore::numConstraints() const { return initialized_ ? size_.num_constraints : -1; }
+int CapeMINLPProblemCore::numConstraints() const { return usable() ? size_.num_constraints : -1; }
 
 int CapeMINLPProblemCore::getVariableNames(const char* names[], int names_size) const {
-    if (!initialized_ || names == nullptr) return -1;
+    if (!usable() || names == nullptr) return -1;
     const int n = std::min<int>(names_size, size_.num_variables);
     for (int i = 0; i < n; ++i) names[i] = var_names_[i].c_str();
     return n;
@@ -297,7 +340,7 @@ int CapeMINLPProblemCore::getVariableDescriptions(const char* descriptions[],
 }
 
 int CapeMINLPProblemCore::getConstraintNames(const char* names[], int names_size) const {
-    if (!initialized_ || names == nullptr) return -1;
+    if (!usable() || names == nullptr) return -1;
     const int n = std::min<int>(names_size, size_.num_constraints);
     for (int i = 0; i < n; ++i) names[i] = con_names_[i].c_str();
     return n;
@@ -313,7 +356,7 @@ int CapeMINLPProblemCore::getOptions(double* options, int options_size) const {
 }
 
 int CapeMINLPProblemCore::getVariableBounds(double* xlow, double* xupp, int x_size) const {
-    if (!initialized_ || xlow == nullptr || xupp == nullptr) return -1;
+    if (!usable() || xlow == nullptr || xupp == nullptr) return -1;
     const int n = std::min<int>(x_size, size_.num_variables);
     for (int i = 0; i < n; ++i) {
         xlow[i] = var_lower_[i];
@@ -323,7 +366,7 @@ int CapeMINLPProblemCore::getVariableBounds(double* xlow, double* xupp, int x_si
 }
 
 int CapeMINLPProblemCore::getConstraintBounds(double* clow, double* cupp, int c_size) const {
-    if (!initialized_ || clow == nullptr || cupp == nullptr) return -1;
+    if (!usable() || clow == nullptr || cupp == nullptr) return -1;
     const int n = std::min<int>(c_size, size_.num_constraints);
     for (int i = 0; i < n; ++i) {
         clow[i] = con_lower_[i];
@@ -333,7 +376,7 @@ int CapeMINLPProblemCore::getConstraintBounds(double* clow, double* cupp, int c_
 }
 
 int CapeMINLPProblemCore::getInitialX(double* x0, int x0_size) const {
-    if (!initialized_ || x0 == nullptr) return -1;
+    if (!usable() || x0 == nullptr) return -1;
     const int n = std::min<int>(x0_size, size_.num_variables);
     for (int i = 0; i < n; ++i) x0[i] = initial_x_[i];
     return n;
@@ -348,7 +391,7 @@ int CapeMINLPProblemCore::getLinearConstraints(int* lcons_rowidx, int* lcons_col
 }
 
 int CapeMINLPProblemCore::getObjectiveGradientStructure(int* obj_colidx, int* obj_colidx_size) const {
-    if (!initialized_ || obj_colidx_size == nullptr) return -1;
+    if (!usable() || obj_colidx_size == nullptr) return -1;
     const int nnz = static_cast<int>(objgrad_colidx_.size());
     if (obj_colidx == nullptr) {  // 第一段：查长度
         *obj_colidx_size = nnz;
@@ -362,7 +405,7 @@ int CapeMINLPProblemCore::getObjectiveGradientStructure(int* obj_colidx, int* ob
 
 int CapeMINLPProblemCore::getConstraintJacobianStructure(int* cons_rowidx, int* cons_colidx,
                                                          int* nnz) const {
-    if (!initialized_ || nnz == nullptr) return -1;
+    if (!usable() || nnz == nullptr) return -1;
     const int total = static_cast<int>(jac_rowidx_.size());
     if (cons_rowidx == nullptr || cons_colidx == nullptr) {  // 第一段：查长度
         *nnz = total;
@@ -378,7 +421,7 @@ int CapeMINLPProblemCore::getConstraintJacobianStructure(int* cons_rowidx, int* 
 }
 
 int CapeMINLPProblemCore::setX(const double* x, int x_size) {
-    if (!initialized_ || x == nullptr) return -1;
+    if (!usable() || x == nullptr) return -1;
     const int n = std::min<int>(x_size, size_.num_variables);
     x_.assign(x, x + n);
     const std::vector<int> vids = allVariableIds();
@@ -390,12 +433,12 @@ int CapeMINLPProblemCore::setX(const double* x, int x_size) {
 int CapeMINLPProblemCore::runTimeCheck() const { return 1; }
 
 int CapeMINLPProblemCore::evaluateObjective(double* obj) const {
-    if (!initialized_ || obj == nullptr) return -1;
+    if (!usable() || obj == nullptr) return -1;
     return model_->getObjectiveValue(*obj);
 }
 
 int CapeMINLPProblemCore::evaluateConstraints(double* cons, int cons_size) const {
-    if (!initialized_ || cons == nullptr) return -1;
+    if (!usable() || cons == nullptr) return -1;
     std::vector<double> values;
     if (model_->getNonlinearConstraintValues(allConstraintIds(), values) < 0) return -1;
     const int n = std::min<int>(cons_size, static_cast<int>(values.size()));
@@ -404,7 +447,7 @@ int CapeMINLPProblemCore::evaluateConstraints(double* cons, int cons_size) const
 }
 
 int CapeMINLPProblemCore::evaluateObjectiveGradient(double* grad, int grad_size) const {
-    if (!initialized_ || grad == nullptr) return -1;
+    if (!usable() || grad == nullptr) return -1;
     std::vector<double> values;
     if (model_->getObjectiveDerivativeValues(cape::kDerivNonlinear, values) < 0) return -1;
     const int n = std::min<int>(grad_size, static_cast<int>(values.size()));
@@ -413,7 +456,7 @@ int CapeMINLPProblemCore::evaluateObjectiveGradient(double* grad, int grad_size)
 }
 
 int CapeMINLPProblemCore::evaluateConstraintsJacobianValues(double* values, int values_size) const {
-    if (!initialized_ || values == nullptr) return -1;
+    if (!usable() || values == nullptr) return -1;
     std::vector<double> jac;
     if (model_->getConstraintDerivativeValues(cape::kStructJacobian, allConstraintIds(), jac) < 0) {
         return -1;

@@ -157,6 +157,27 @@ void onTopologyRefreshFailed(CapeOpenModelContext* ctx, const char* what) {
     ctx->topology_read = false;
 }
 
+// 刷新已交付的问题对象；没有交付过就什么都不用做。
+//
+// 端口重读远远不够：宿主手里那个 buildProblem 交付的对象缓存着重建**之前**的
+// 规模、名称、界与 Jacobian 结构。固定集合一变服务端约束数就变，组分一换更是
+// 整个规模都变——不刷新的话 numConstraints() 报旧数，下一次 evaluateConstraints()
+// 长度对不上直接返回 -1，求解在这里断掉且看不出原因。
+//
+// 刷新失败时 core 会把自己标成 stale 并让所有读取返回 -1（缓存里那份是旧问题
+// 的结构，供出去等于安静地解错题）。这笔欠账由 t_setSlate 的重试路径补上。
+int refreshLiveProblem(CapeOpenModelContext* ctx, const char* what) {
+    if (ctx->live_problem == nullptr) return 0;
+    if (ctx->live_problem->refresh() < 0) {
+        std::fprintf(stderr,
+                     "xRtoCapeOpen: %s: refreshing the delivered problem failed; it is now "
+                     "marked stale and will refuse to serve until a later refresh succeeds\n",
+                     what);
+        return -1;
+    }
+    return 0;
+}
+
 void ensureTopology(CapeOpenModelContext* ctx) {
     if (ctx == nullptr || ctx->topology_read) return;
     if (ctx->conn.rfind("corba:", 0) != 0) {
@@ -514,7 +535,16 @@ int t_setSlate(xOptModelHandle h, int slate_index, const xOptSlate* slate) {
         wanted.emplace_back(slate->components[i]);
     }
     if (wanted.empty()) return -1;
-    if (wanted == ctx->topology.components()) return 0;  // 没变，不惊动远端
+    if (wanted == ctx->topology.components()) {
+        // 组分没变，不惊动远端。**但不能直接说成功**：上一次刷新可能失败过，
+        // 已交付的问题对象还停在 stale。这里不补的话，同一份 slate 重试永远
+        // 走不到下面的重建分支，那个问题对象就再也回不来了——故障恢复之后
+        // 一切看着正常，唯独结构还是旧的。
+        if (ctx->live_problem != nullptr && ctx->live_problem->isStale()) {
+            return refreshLiveProblem(ctx, "setSlate(retry after a failed refresh)");
+        }
+        return 0;
+    }
 
     if (ctx->topology.setComponents(wanted) < 0) {
         // setComponents 内部以 read() 收尾，失败可能停在"已 clear、未填回"的
@@ -525,12 +555,7 @@ int t_setSlate(xOptModelHandle h, int slate_index, const xOptSlate* slate) {
     rebuildPortIndex(ctx);  // 远端重建过了，本地索引跟着重建
     // 同 generateEstimate：组分一换，变量与约束数必然变，已交付的问题对象
     // 不刷新就是错的。
-    if (ctx->live_problem != nullptr && ctx->live_problem->refresh() < 0) {
-        std::fprintf(stderr,
-                     "xRtoCapeOpen: setSlate rebuilt the remote problem but refreshing the "
-                     "delivered problem failed\n");
-        return -1;
-    }
+    if (refreshLiveProblem(ctx, "setSlate") < 0) return -1;
     return 0;
 #else
     (void)h; (void)slate_index; (void)slate;
@@ -574,17 +599,7 @@ int t_generateEstimate(xOptModelHandle h, double initx[], int& size,
     }
     rebuildPortIndex(ctx);  // 远端重建过，本地索引跟着重建
 
-    // 端口重读还不够：宿主可能已经拿着一个 buildProblem 交付的问题对象，
-    // 而它缓存着重建**之前**的规模、名称、界与 Jacobian 结构。固定集合一变，
-    // 服务端的约束数就跟着变（进料固定等式是按固定集合生成的），此时
-    // numConstraints() 报的是旧数，下一次 evaluateConstraints() 长度对不上
-    // 直接返回 -1 —— 求解在这里断掉，且看不出原因。
-    if (ctx->live_problem != nullptr && ctx->live_problem->refresh() < 0) {
-        std::fprintf(stderr,
-                     "xRtoCapeOpen: the remote problem was rebuilt but refreshing the "
-                     "delivered problem failed; it would keep a stale structure\n");
-        return -1;
-    }
+    if (refreshLiveProblem(ctx, "generateEstimate") < 0) return -1;
 
     if (initx == nullptr) {  // 第一段：只报个数
         size = static_cast<int>(x0.size());

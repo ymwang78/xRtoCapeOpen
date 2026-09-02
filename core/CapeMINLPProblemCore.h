@@ -33,6 +33,10 @@ class CapeMINLPProblemCore {
     // 下一次 evaluateConstraints() 因长度对不上直接返回 -1。
     int refresh();
 
+    // 上一次 refresh() 失败、缓存尚未与远端对齐。此状态下所有读取一律返回 -1：
+    // 缓存里那份是**旧问题**的结构，拿它继续求解等于安静地解错题。
+    bool isStale() const { return structure_stale_; }
+
     // 登记一个"活动实例槽"。本对象析构时会把该槽置空，模型上下文因此不会
     // 拿着一个已释放的指针去 refresh()。传 nullptr 解除登记（模型先于问题
     // 销毁时用）。所有权仍在宿主手里，这里只是双向注销。
@@ -69,9 +73,14 @@ class CapeMINLPProblemCore {
     // initialize()/refresh() 共用的结构读取（不含 connect）
     int readStructure();
 
+    // 缓存可用 = 已初始化且与远端对齐。所有读取都走这个判据，而不是只看
+    // initialized_：刷新失败后缓存里那份是旧问题的结构，供出去就是解错题。
+    bool usable() const { return initialized_ && !structure_stale_; }
+
     std::unique_ptr<ICapeMINLPModel> model_;
     CapeMINLPProblemCore** live_slot_ = nullptr;
     bool initialized_ = false;
+    bool structure_stale_ = false;
     CapeMINLPSize size_{};
 
     // initialize() 阶段缓存（避免重复跨界调用、保证字符串指针稳定）
