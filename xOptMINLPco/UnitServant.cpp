@@ -168,21 +168,36 @@ void UnitServant::destroyPorts() {
 void UnitServant::buildPorts(PortableServer::POA_ptr poa) {
     std::vector<CORBA::Object_var> refs;
     std::vector<std::string> names;
-    if (adapter_ != nullptr) {
-        for (const XOptPortDesc& p : adapter_->ports()) {
-            PortServant* servant = new PortServant(p.name, p.is_input);
-            // 激活后立刻 _remove_ref：所有权交给 POA，本对象只留引用。
-            PortableServer::ObjectId_var oid = poa->activate_object(servant);
-            refs.push_back(poa->id_to_reference(oid.in()));
-            port_refs_.push_back(refs.back());
-            names.push_back(p.name);
-            servant->_remove_ref();
+    // 两层异常安全，缺一层都会漏：
+    //
+    // ServantBase_var 管**当前这一个** servant——所有权交给 POA 之后本对象只留
+    // 引用，那一次 _remove_ref 无论正常还是抛出都要发生。手写在末尾的话，
+    // activate_object / id_to_reference 抛出就漏掉。这也是 MINLPCorbaServer.cpp
+    // 里已有的写法。
+    //
+    // catch 管**这一轮已经激活过的那些**。buildPorts 是构造函数调的，中途抛出
+    // 意味着 ~UnitServant 根本不会执行，前面激活成功的 PortServant 会一直留在
+    // POA 里、还能被解析到。destroyPorts 读的是 port_refs_，而它是边激活边填的，
+    // 正好是需要注销的那一批；poa_ 在成员初始化列表里就绪，构造期调用是安全的。
+    try {
+        if (adapter_ != nullptr) {
+            for (const XOptPortDesc& p : adapter_->ports()) {
+                PortServant* servant = new PortServant(p.name, p.is_input);
+                PortableServer::ServantBase_var owner(servant);  // 出作用域 _remove_ref
+                PortableServer::ObjectId_var oid = poa->activate_object(servant);
+                refs.push_back(poa->id_to_reference(oid.in()));
+                port_refs_.push_back(refs.back());
+                names.push_back(p.name);
+            }
         }
+        PortCollectionServant* coll = new PortCollectionServant(std::move(refs), std::move(names));
+        PortableServer::ServantBase_var coll_owner(coll);
+        PortableServer::ObjectId_var oid = poa->activate_object(coll);
+        ports_collection_ = poa->id_to_reference(oid.in());
+    } catch (...) {
+        destroyPorts();
+        throw;
     }
-    PortCollectionServant* coll = new PortCollectionServant(std::move(refs), std::move(names));
-    PortableServer::ObjectId_var oid = poa->activate_object(coll);
-    ports_collection_ = poa->id_to_reference(oid.in());
-    coll->_remove_ref();
 }
 
 char* UnitServant::GetComponentName() { return CORBA::string_dup(name_.c_str()); }
