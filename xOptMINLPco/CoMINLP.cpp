@@ -26,7 +26,11 @@ CoMINLP::CoMINLP() {
         init_error_ = "XRTO_XOPT_PROBLEM_DLL not set";
         return;
     }
-    owned_ = std::make_unique<XOptMINLPAdapter>(std::string(dll));
+    // 描述 JSON（C-ABI 模型的初始化序列要用）。不给就让 adapter 在 DLL 同目录
+    // 自动发现唯一的 *_Model.json——部署形态本来就是 DLL 与描述同目录。
+    const char* desc = std::getenv("XRTO_XOPT_MODEL_DESC");
+    owned_ = std::make_unique<XOptMINLPAdapter>(
+        std::string(dll), desc != nullptr ? std::string(desc) : std::string());
     if (owned_->connect() < 0) {
         init_error_ = "adapter connect failed: " + owned_->lastError();
         owned_.reset();

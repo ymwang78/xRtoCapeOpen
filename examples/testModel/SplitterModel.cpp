@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <utility>
 #include <new>
 #include <string>
 #include <vector>
@@ -62,7 +63,11 @@ class SplitterProblem {
     void evalConstraints(std::vector<double>& cons) const;
 
     int n_;                 // 变量个数 = 3N+6
-    int m_;                 // 约束个数 = 6+4N
+    // 约束个数 = 4 + 3N + P，P 是宿主实际固定的进料变量条数（0..2+N）。
+    // 独立使用时宿主会把 in_T/in_P/in_fi_* 全固定，P = 2+N，退化成文档里的
+    // 6+4N，问题恰好是方阵；接进流程图时上游流股决定进料，宿主一个都不固定，
+    // P = 0，问题欠定 2+N —— 差的正是上游那几个连接方程。
+    int m_;
     int comp_n_;            // 组分个数 N
     double split_ratio_;    // 分流比 r
     double min_product_flow_;
@@ -78,6 +83,14 @@ class SplitterProblem {
     // 进料固定值（generateEstimate 通道缓存，未固定时取默认值）
     double fixed_t_, fixed_p_;
     std::vector<double> fixed_fi_;
+
+    // 实际追加的"进料固定"等式：(变量下标, 固定值)，按 in_T / in_P / in_fi_* 的
+    // 顺序，只含宿主经 generateEstimate 真的点过名的那些。
+    //
+    // 为什么必须条件化：这几条等式原本是无条件加的，为的是让独立 demo 恰好方阵
+    // （Readme §2.4）。可一旦接进流程图，进料由上游流股决定，这几条就成了多余的
+    // 方程——值不一致直接不可行，值一致也把雅可比压成降秩。实测就是这么失败的。
+    std::vector<std::pair<int, double>> pins_;
 
     std::vector<double> x_;
     bool x_set_ = false;
@@ -99,10 +112,10 @@ class SplitterProblem {
     int cOut2P() const { return 3; }
     int cOut1Fi(int i) const { return 4 + i; }
     int cOut2Fi(int i) const { return 4 + comp_n_ + i; }
-    int cInT() const { return 4 + 2 * comp_n_; }
-    int cInP() const { return cInT() + 1; }
-    int cInFi(int i) const { return cInT() + 2 + i; }
-    int cIneq(int i) const { return 6 + 3 * comp_n_ + i; }
+    // 进料固定等式紧跟在物料/温压等式之后，按 pins_ 的顺序排。
+    int cPinBase() const { return 4 + 2 * comp_n_; }
+    int cPin(int k) const { return cPinBase() + k; }
+    int cIneq(int i) const { return cPinBase() + static_cast<int>(pins_.size()) + i; }
 };
 
 // ***************************************************************
@@ -220,6 +233,12 @@ class SplitterModel {
     }
 
     // 进料固定值：已固定用固定值，否则用默认值
+    // 宿主经 generateEstimate 真的点过这个名字吗。与 fixedValue 的区别很关键：
+    // fixedValue 拿不到就给默认值，回答不了"到底有没有被固定"。
+    bool isFixed(const std::string& name) const {
+        return fixed_values_.find(name) != fixed_values_.end();
+    }
+
     double fixedValue(const std::string& name, double def) const {
         auto it = fixed_values_.find(name);
         return (it != fixed_values_.end()) ? it->second : def;
@@ -292,9 +311,8 @@ SplitterProblem::SplitterProblem(const SplitterModel& model) {
     split_ratio_ = model.splitRatio();
     min_product_flow_ = model.minProductFlow();
     n_ = 3 * comp_n_ + 6;
-    m_ = 6 + 4 * comp_n_;
 
-    // 进料固定值：未固定取默认初值
+    // 进料固定值：未固定取默认初值（初值总要有，等式则只为真被固定的加）
     fixed_t_ = model.fixedValue("in_T", kDefaultT);
     fixed_p_ = model.fixedValue("in_P", kDefaultP);
     fixed_fi_.resize(comp_n_);
@@ -342,6 +360,14 @@ SplitterProblem::SplitterProblem(const SplitterModel& model) {
     x0_[inP()] = fixed_p_;
     for (int i = 0; i < comp_n_; ++i) x0_[inFi(i)] = fixed_fi_[i];
 
+    // 只为**宿主真的固定了的**进料变量追加等式（见 pins_ 的注释）。
+    if (model.isFixed("in_T")) pins_.emplace_back(inT(), fixed_t_);
+    if (model.isFixed("in_P")) pins_.emplace_back(inP(), fixed_p_);
+    for (int i = 0; i < comp_n_; ++i) {
+        if (model.isFixed(var_names_[inFi(i)])) pins_.emplace_back(inFi(i), fixed_fi_[i]);
+    }
+    m_ = 4 + 3 * comp_n_ + static_cast<int>(pins_.size());
+
     // ---- 约束表 ----
     auto addEq = [&](const std::string& name) {
         cons_names_.push_back(name);
@@ -356,10 +382,9 @@ SplitterProblem::SplitterProblem(const SplitterModel& model) {
         addEq("out1_fi - r*in_fi [" + std::to_string(i) + "]");
     for (int i = 0; i < comp_n_; ++i)
         addEq("out2_fi - (1-r)*in_fi [" + std::to_string(i) + "]");
-    addEq("in_T fixed");
-    addEq("in_P fixed");
-    for (int i = 0; i < comp_n_; ++i)
-        addEq("in_fi fixed [" + std::to_string(i) + "]");
+    for (const auto& pin : pins_) {
+        addEq(var_names_[pin.first] + " fixed");
+    }
     for (int i = 0; i < comp_n_; ++i) {  // 不等式：out1_fi >= min_product_flow
         cons_names_.push_back("out1_fi >= mpf [" + std::to_string(i) + "]");
         clow_.push_back(min_product_flow_);
@@ -386,10 +411,10 @@ SplitterProblem::SplitterProblem(const SplitterModel& model) {
         addJac(cOut2Fi(i), out2Fi(i), 1.0);
         addJac(cOut2Fi(i), inFi(i), -(1.0 - split_ratio_));
     }
-    addJac(cInT(), inT(), 1.0);
-    addJac(cInP(), inP(), 1.0);
+    for (size_t k = 0; k < pins_.size(); ++k) {
+        addJac(cPin(static_cast<int>(k)), pins_[k].first, 1.0);
+    }
     for (int i = 0; i < comp_n_; ++i) {
-        addJac(cInFi(i), inFi(i), 1.0);
         addJac(cIneq(i), out1Fi(i), 1.0);
     }
 
@@ -408,10 +433,11 @@ void SplitterProblem::evalConstraints(std::vector<double>& cons) const {
         cons[cOut1Fi(i)] = x_[out1Fi(i)] - split_ratio_ * x_[inFi(i)];
         cons[cOut2Fi(i)] = x_[out2Fi(i)] - (1.0 - split_ratio_) * x_[inFi(i)];
     }
-    // 进料固定（等价于宿主 xOptModelFixVars 追加的等式）
-    cons[cInT()] = x_[inT()] - fixed_t_;
-    cons[cInP()] = x_[inP()] - fixed_p_;
-    for (int i = 0; i < comp_n_; ++i) cons[cInFi(i)] = x_[inFi(i)] - fixed_fi_[i];
+    // 进料固定（等价于宿主 xOptModelFixVars 追加的等式）。只有宿主真的固定了
+    // 的变量才在这里；没固定的由上游流股决定，多加一条就是多一个方程。
+    for (size_t k = 0; k < pins_.size(); ++k) {
+        cons[cPin(static_cast<int>(k))] = x_[pins_[k].first] - pins_[k].second;
+    }
     // 不等式：返回约束函数值本身，由 [clow, cupp] 判定
     for (int i = 0; i < comp_n_; ++i) cons[cIneq(i)] = x_[out1Fi(i)];
 }

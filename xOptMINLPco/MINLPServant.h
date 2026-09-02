@@ -50,6 +50,15 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
     explicit MINLPServant(ICapeMINLPModel* model);
 
     bool ok() const { return model_ != nullptr; }
+    // 构造失败的原因（adapter 的 lastError）。默认构造把 DLL 加载与模型初始化
+    // 都做了，失败方式不止一种；只报 "not ready" 会把 initModel 精心区分出来的
+    // 那些原因（参数名不对、缺组分表、校验没过）全抹平成同一句话。
+    const std::string& initError() const { return init_error_; }
+
+    // 生产构造时本对象自己建的那个 adapter（注入构造时为 nullptr）。
+    // UnitServant 要用同一个 adapter 才能保证两个 CORBA 对象说的是同一个模型；
+    // 让服务端各建一份会加载两次 DLL，两份状态互不相干。
+    class XOptMINLPAdapter* ownedAdapter() const { return owned_adapter_; }
 
     // ---- 规模与结构 ----
     void GetMINLPSize(::CAPEOPEN100::Common::Types::CapeLong_out nv,
@@ -164,6 +173,8 @@ class MINLPServant : public POA_CAPEOPEN100::Business::Numeric::Minlp::ICapeMINL
   private:
     ICapeMINLPModel* model_ = nullptr;
     std::unique_ptr<ICapeMINLPModel> owned_;
+    class XOptMINLPAdapter* owned_adapter_ = nullptr;  // == owned_.get()，省一次 downcast
+    std::string init_error_;
     std::string comp_name_ = "xOpt MINLP";
     std::string comp_desc_ = "xOpt problem published as CAPE-OPEN MINLP";
 };

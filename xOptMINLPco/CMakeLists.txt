@@ -16,6 +16,7 @@ set(XOPT_INCLUDE_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/../../../include")
 # ---- N1：provider 核心（传输无关）----
 add_library(xoptminlpco STATIC
     XOptMINLPAdapter.cpp
+    XOptModelDesc.cpp   # C-ABI 黑箱模型的部署描述（参数/组分表/固定变量）
 )
 target_include_directories(xoptminlpco PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -47,20 +48,32 @@ if(WITH_XOPTMINLPCO_COM)
     target_link_libraries(xoptminlpco_com PUBLIC xoptminlpco capeopen_core)
 
     # COM inproc server DLL：产物 xOptMINLPco.dll
-    add_library(xOptMINLPco SHARED
+    #
+    # target 名刻意**不叫** xOptMINLPco：它与静态核心库 xoptminlpco 只差大小写，
+    # 而 Visual Studio 生成器按 target 名产出 <名字>.vcxproj——在大小写不敏感的
+    # 文件系统上两个工程文件是同一个，MSBuild 解析工程引用时就绕成环，报
+    # `MSB4006 ... ResolveProjectReferences ... 循环依赖`，整个解决方案建不动
+    # （Ninja 不产工程文件，所以一直没暴露）。这和下面那条导入库改名是同一个
+    # 撞车的两个层面：那条撞的是 .lib，这条撞的是 .vcxproj。
+    #
+    # 对外产物不变：OUTPUT_NAME 仍是 xOptMINLPco，DLL 依旧是 xOptMINLPco.dll，
+    # 注册表 InprocServer32、xOptMINLPco.def、手写的 xOptMINLPco.vcxproj 都不受影响。
+    add_library(xoptminlpco_dll SHARED
         xOptMINLPcoServer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/xOptMINLPco.def
     )
-    target_link_libraries(xOptMINLPco PRIVATE xoptminlpco_com)
+    target_link_libraries(xoptminlpco_dll PRIVATE xoptminlpco_com)
     # DLL 名为 xOptMINLPco.dll；导入库改名避免与静态库 xoptminlpco.lib 大小写冲突(LNK1149)。
-    set_target_properties(xOptMINLPco PROPERTIES
+    set_target_properties(xoptminlpco_dll PROPERTIES
         OUTPUT_NAME "xOptMINLPco" PREFIX ""
         ARCHIVE_OUTPUT_NAME "xOptMINLPco_import")
 endif()
 
 # ---- N4：CORBA 前端 ----
 if(WITH_XOPTMINLPCO_CORBA)
-    add_library(xoptminlpco_corba STATIC MINLPServant.cpp)
+    # UnitServant 与 MINLPServant 同库：两者共用同一个 XOptMINLPAdapter，
+    # 也共用同一批 IDL stub，拆开只会多一条链接顺序约束。
+    add_library(xoptminlpco_corba STATIC MINLPServant.cpp UnitServant.cpp)
     # capeopen_corba PUBLIC 传递 TAO include/defines/libs + capeopen100_minlp
     # 由 tao_idl 从 CAPEOPEN100_Minlp.idl 生成的 stub 头
     target_link_libraries(xoptminlpco_corba PUBLIC xoptminlpco capeopen_corba)
@@ -102,6 +115,44 @@ if(XOPTMINLPCO_BUILD_TESTS)
     target_link_libraries(test_xoptminlpco_capi PRIVATE xoptminlpco GTest::gtest)
     add_test(NAME XOptMINLPcoCapiTest COMMAND test_xoptminlpco_capi)
 
+    # 测试夹具：导出 xOptModel_createModel 的 C-ABI 模型 DLL，且刻意要求完整的
+    # 初始化握手（参数/slate/校验/generateEstimate）才肯 buildProblem。
+    # 测试按绝对路径加载它，故不限 Windows。
+    add_library(mock_xoptmodel SHARED ${CMAKE_CURRENT_SOURCE_DIR}/../tests/mock_xoptmodel_dll.cpp)
+    target_include_directories(mock_xoptmodel PRIVATE ${XOPT_INCLUDE_DIR})
+
+    # 输出目录固定在一个自己的子目录里，两个原因：
+    #   1. 路径要能作为 C 字符串字面量传给测试。$<TARGET_FILE:> 在 MSVC 下可能
+    #      给出反斜杠路径，塞进 -D"...=\"C:\path\to\x.dll\"" 后 \p、\t 会被
+    #      编译器当转义序列吃掉——\t 直接变成制表符。用普通 CMake 变量 +
+    #      TO_CMAKE_PATH 拼，正斜杠是有保证的。
+    #   2. 自动发现测试要往 DLL 同目录写 *_Model.json，独占一个目录不会碰到
+    #      别的构建产物。
+    set(MOCK_XOPTMODEL_DIR "${CMAKE_CURRENT_BINARY_DIR}/mockmodel")
+    set_target_properties(mock_xoptmodel PROPERTIES PREFIX "" OUTPUT_NAME "mock_xoptmodel")
+    # 多配置生成器会在 RUNTIME_OUTPUT_DIRECTORY 后追加 /$<CONFIG>，逐配置钉死才作数。
+    foreach(cfg IN ITEMS "" DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        if(cfg STREQUAL "")
+            set(prop_suffix "")
+        else()
+            set(prop_suffix "_${cfg}")
+        endif()
+        set_target_properties(mock_xoptmodel PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY${prop_suffix} "${MOCK_XOPTMODEL_DIR}"
+            LIBRARY_OUTPUT_DIRECTORY${prop_suffix} "${MOCK_XOPTMODEL_DIR}")
+    endforeach()
+    file(TO_CMAKE_PATH "${MOCK_XOPTMODEL_DIR}" MOCK_XOPTMODEL_DIR_FWD)
+
+    # 描述 JSON 解析 + initModel 端到端
+    add_executable(test_xoptminlpco_modeldesc
+        ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_modeldesc.cpp
+    )
+    target_link_libraries(test_xoptminlpco_modeldesc PRIVATE xoptminlpco GTest::gtest)
+    target_compile_definitions(test_xoptminlpco_modeldesc PRIVATE
+        MOCK_XOPTMODEL_DLL="${MOCK_XOPTMODEL_DIR_FWD}/mock_xoptmodel${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    add_dependencies(test_xoptminlpco_modeldesc mock_xoptmodel)
+    add_test(NAME XOptMINLPcoModelDescTest COMMAND test_xoptminlpco_modeldesc)
+
     if(WITH_XOPTMINLPCO_COM)
         # 回环：mock → adapter → CoMINLP → capeopen_core CapeMINLPModelCom
         add_executable(test_xoptminlpco_com
@@ -126,7 +177,7 @@ if(XOPTMINLPCO_BUILD_TESTS)
         )
         target_link_libraries(test_xoptminlpco_register PRIVATE capeopen_core GTest::gtest)
         target_include_directories(test_xoptminlpco_register PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        add_dependencies(test_xoptminlpco_register xOptMINLPco mock_xoptproblem)
+        add_dependencies(test_xoptminlpco_register xoptminlpco_dll mock_xoptproblem)
         add_test(NAME XOptMINLPcoRegisterTest COMMAND test_xoptminlpco_register)
     endif()
 
@@ -140,6 +191,17 @@ if(XOPTMINLPCO_BUILD_TESTS)
 
         # 索引基的非回环校验：直接对着 CORBA stub 手工构造 1-based 入参、手工
         # 写死 1-based 期望值。上面那条回环用例两端都是我们自己，一起偏也照绿。
+        # 接线信息回环：模型 -> adapter -> UnitServant -> (IOR 绕一圈) -> CapeUnitCorba
+        add_executable(test_xoptminlpco_unitports
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_unitports.cpp
+        )
+        target_link_libraries(test_xoptminlpco_unitports
+            PRIVATE xoptminlpco_corba capeopen_corba GTest::gtest)
+        target_compile_definitions(test_xoptminlpco_unitports PRIVATE
+            MOCK_XOPTMODEL_DLL="${MOCK_XOPTMODEL_DIR_FWD}/mock_xoptmodel${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        add_dependencies(test_xoptminlpco_unitports mock_xoptmodel)
+        add_test(NAME XOptMINLPcoUnitPortsTest COMMAND test_xoptminlpco_unitports)
+
         add_executable(test_xoptminlpco_onebased
             ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_onebased.cpp
         )

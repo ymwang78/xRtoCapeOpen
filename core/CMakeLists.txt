@@ -1,4 +1,4 @@
-# ***************************************************************
+﻿# ***************************************************************
 #  capeopen_core  —— 后端无关核心 + 内置 Mock 后端 + DLL C 入口
 #  详见 docs/capeopen_problem_design.md §3.4、§7.1
 # ***************************************************************
@@ -32,12 +32,24 @@ if(WIN32)
 else()
     set(WITH_CAPEOPEN_COM OFF)
 endif()
+# 后端的源码/宏/依赖同时记进累加器：下面的消费端 DLL 直接用这些源码重编一份，
+# 而不是链静态库——xOptModel_createModel 是 DLL 里唯一被外部引用的符号，
+# 链静态库时链接器有充分理由把那个 .obj 整个丢掉，成品导不出任何东西。
+set(CAPEOPEN_BACKEND_SOURCES "")
+set(CAPEOPEN_BACKEND_DEFS "")
+set(CAPEOPEN_BACKEND_LIBS "")
+set(CAPEOPEN_BACKEND_INCLUDES "")
+
 if(WITH_CAPEOPEN_COM)
-    target_sources(capeopen_core PRIVATE
+    list(APPEND CAPEOPEN_BACKEND_SOURCES
         backend/com/CapeVariantMarshal.cpp
         backend/com/CapeMINLPModelCom.cpp
         backend/com/CapeRegisterComBackend.cpp
     )
+    list(APPEND CAPEOPEN_BACKEND_DEFS CAPEOPEN_WITH_COM)
+    list(APPEND CAPEOPEN_BACKEND_LIBS ole32 oleaut32 uuid)
+
+    target_sources(capeopen_core PRIVATE ${CAPEOPEN_BACKEND_SOURCES})
     target_compile_definitions(capeopen_core PUBLIC CAPEOPEN_WITH_COM)
     target_link_libraries(capeopen_core PUBLIC ole32 oleaut32 uuid)
 endif()
@@ -75,9 +87,38 @@ if(WITH_CAPEOPEN_CORBA)
         COMMENT "tao_idl: generating CAPEOPEN100 (official module path) stubs"
         VERBATIM)
 
+    # Unit Operation / Collection / Parameter 子集（重建，见
+    # tools/gen_capeopen_unit_idl.py）与我们自己的扩展。两者都 #include 上面
+    # 那份 Minlp IDL 复用 Common::Types/Error/Identification，所以 tao_idl 的
+    # include 路径要带上仓库根。
+    set(CO_UNIT_IDL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../CAPEOPEN100_Unit.idl")
+    set(CO_EXT_IDL_FILE  "${CMAKE_CURRENT_SOURCE_DIR}/../XOPTCO_Ext.idl")
+    add_custom_command(
+        OUTPUT ${IDL_GEN_DIR}/CAPEOPEN100_UnitC.cpp ${IDL_GEN_DIR}/CAPEOPEN100_UnitS.cpp
+               ${IDL_GEN_DIR}/CAPEOPEN100_UnitC.h  ${IDL_GEN_DIR}/CAPEOPEN100_UnitS.h
+        COMMAND "${TAO_IDL_EXE}" -Yp,${CMAKE_CXX_COMPILER} -I "${TAO_INCLUDE_DIR}"
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/.." -o "${IDL_GEN_DIR}" "${CO_UNIT_IDL_FILE}"
+        DEPENDS "${CO_UNIT_IDL_FILE}" "${CO_IDL_FILE}"
+        COMMENT "tao_idl: generating CAPEOPEN100 Unit/Collection/Parameter stubs"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT ${IDL_GEN_DIR}/XOPTCO_ExtC.cpp ${IDL_GEN_DIR}/XOPTCO_ExtS.cpp
+               ${IDL_GEN_DIR}/XOPTCO_ExtC.h  ${IDL_GEN_DIR}/XOPTCO_ExtS.h
+        COMMAND "${TAO_IDL_EXE}" -Yp,${CMAKE_CXX_COMPILER} -I "${TAO_INCLUDE_DIR}"
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/.." -o "${IDL_GEN_DIR}" "${CO_EXT_IDL_FILE}"
+        DEPENDS "${CO_EXT_IDL_FILE}" "${CO_UNIT_IDL_FILE}" "${CO_IDL_FILE}"
+        COMMENT "tao_idl: generating XOPTCO extension stubs (ours, not CAPE-OPEN)"
+        VERBATIM)
+
+    # 一个静态库装全部三份 stub：它们本来就互相 #include，拆库只会制造
+    # "谁先谁后"的链接顺序问题，而它们的生命周期完全一致。
     add_library(capeopen100_minlp STATIC
         ${IDL_GEN_DIR}/CAPEOPEN100_MinlpC.cpp
         ${IDL_GEN_DIR}/CAPEOPEN100_MinlpS.cpp
+        ${IDL_GEN_DIR}/CAPEOPEN100_UnitC.cpp
+        ${IDL_GEN_DIR}/CAPEOPEN100_UnitS.cpp
+        ${IDL_GEN_DIR}/XOPTCO_ExtC.cpp
+        ${IDL_GEN_DIR}/XOPTCO_ExtS.cpp
     )
     target_include_directories(capeopen100_minlp PUBLIC ${IDL_GEN_DIR} ${TAO_INCLUDE_DIR})
     target_compile_definitions(capeopen100_minlp PUBLIC
@@ -90,9 +131,22 @@ if(WITH_CAPEOPEN_CORBA)
     # MINLP 通路已迁到官方模块路径的 stub（capeopen100_minlp）。SqpSolver.idl
     # 仍为仓库根的旧 solver 侧代码保留，但不再参与本通路：用自造模块的 stub
     # 去 _narrow 一个真实 CO 组件的引用必然返回 nil。
+    list(APPEND CAPEOPEN_BACKEND_SOURCES
+        backend/corba/CapeMINLPModelCorba.cpp
+        backend/corba/CapeRegisterCorbaBackend.cpp
+        backend/corba/CapeUnitCorba.cpp
+    )
+    list(APPEND CAPEOPEN_BACKEND_DEFS
+        WIN32 ACE_AS_STATIC_LIBS=1 TAO_AS_STATIC_LIBS=1 CAPEOPEN_WITH_CORBA)
+    list(APPEND CAPEOPEN_BACKEND_LIBS capeopen100_minlp
+        TAO_PortableServers TAO_AnyTypeCodes TAOs ACEs
+        ws2_32 mswsock advapi32 user32 iphlpapi)
+    list(APPEND CAPEOPEN_BACKEND_INCLUDES ${IDL_GEN_DIR} ${TAO_INCLUDE_DIR})
+
     add_library(capeopen_corba STATIC
         backend/corba/CapeMINLPModelCorba.cpp
         backend/corba/CapeRegisterCorbaBackend.cpp
+        backend/corba/CapeUnitCorba.cpp
     )
     target_link_libraries(capeopen_corba PUBLIC capeopen100_minlp)
     target_include_directories(capeopen_corba PUBLIC
@@ -103,6 +157,43 @@ if(WITH_CAPEOPEN_CORBA)
     target_link_libraries(capeopen_corba PUBLIC capeopen_core
         TAO_PortableServers TAO_AnyTypeCodes TAOs ACEs
         ws2_32 mswsock advapi32 user32 iphlpapi)
+endif()
+
+# ***************************************************************
+#  消费端 DLL —— xRto 侧真正加载的那一个（design §3 的架构图）
+#  -------------------------------------------------------------
+#  产物 xRtoCapeOpen.dll，只导出一个 C 符号 xOptModel_createModel。
+#  在 xRto 的 UnitModel.json 里按 ModelType="BlackBox" 注册，
+#  ModelPath 指向本 DLL；连接目标经环境变量 XRTO_CAPEOPEN_TARGET 给，
+#  例如 "corba:corbaname::localhost:2809#xOpt/Splitter" 或 "corba:IOR:0100..."。
+#
+#  target 名不叫 xRtoCapeOpen：仓库根的 project() 就叫这个，而 VS 生成器按
+#  target 名产工程文件，大小写不敏感的文件系统上同名会绕成 MSB4006 循环依赖
+#  （xOptMINLPco 那边刚踩过）。OUTPUT_NAME 保证产物名不变。
+# ***************************************************************
+option(WITH_CAPEOPEN_MODEL_DLL "Build the consumer-side black-box model DLL (xRtoCapeOpen.dll)" ON)
+if(WITH_CAPEOPEN_MODEL_DLL)
+    add_library(xrtocapeopen_dll SHARED
+        ${CAPEOPEN_CORE_SOURCES}
+        ${CAPEOPEN_BACKEND_SOURCES}
+    )
+    set_target_properties(xrtocapeopen_dll PROPERTIES
+        OUTPUT_NAME "xRtoCapeOpen" PREFIX ""
+        ARCHIVE_OUTPUT_NAME "xRtoCapeOpen_import")
+    target_include_directories(xrtocapeopen_dll PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${XOPT_INCLUDE_DIR}
+        ${CAPEOPEN_BACKEND_INCLUDES}
+    )
+    if(CAPEOPEN_BACKEND_DEFS)
+        target_compile_definitions(xrtocapeopen_dll PRIVATE ${CAPEOPEN_BACKEND_DEFS})
+    endif()
+    if(CAPEOPEN_BACKEND_LIBS)
+        target_link_libraries(xrtocapeopen_dll PRIVATE ${CAPEOPEN_BACKEND_LIBS})
+    endif()
+    if(WITH_CAPEOPEN_CORBA)
+        target_link_directories(xrtocapeopen_dll PRIVATE ${TAO_LIB_DIR})
+    endif()
 endif()
 
 # ---- 单元测试（仅依赖 GTest + capeopen_core，零外部传输依赖）----
@@ -156,5 +247,12 @@ if(CAPEOPEN_CORE_BUILD_TESTS)
         )
         target_link_libraries(test_capeopen100_rid PRIVATE capeopen100_minlp GTest::gtest)
         add_test(NAME CapeOpen100RidTest COMMAND test_capeopen100_rid)
+
+        # Unit/Collection/Parameter 与我们自己的扩展，同样把 RID 钉死。
+        add_executable(test_capeopen100_unit_rid
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_capeopen100_unit_rid.cpp
+        )
+        target_link_libraries(test_capeopen100_unit_rid PRIVATE capeopen100_minlp GTest::gtest)
+        add_test(NAME CapeOpen100UnitRidTest COMMAND test_capeopen100_unit_rid)
     endif()
 endif()
