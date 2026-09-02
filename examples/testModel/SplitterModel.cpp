@@ -452,6 +452,16 @@ int SplitterModel::generateEstimate(double initx[], int& size, const char fixed_
     }
     if (size != n) return -1;
     // 解包 "name1\0name2\0..."，与 fixed_var_values 一一对应
+    // 这一次调用给的就是**完整**的固定集，不是增量：先清空再装。
+    //
+    // 只插不清的话，把一个原本用户固定的进料接上流股之后，宿主这次不再点它的
+    // 名字，可 isFixed 仍然报 true —— SplitterProblem 会继续为它追加一条进料
+    // 固定等式，模型被多约束住。而且"空表 = 一个都不固定"这个语义会反过来变成
+    // "空表 = 沿用上次"，与设计正相反（见 pins_ 上面那段注释）。
+    //
+    // 清空放在这里而不是函数开头：第一段查询（initx == nullptr）在上面就返回了，
+    // 若在开头清，一次单纯的问个数就会把缓存抹掉。
+    fixed_values_.clear();
     const char* p = fixed_var_names;
     for (int i = 0; i < fixed_var_size; ++i) {
         if (p == nullptr) return -1;

@@ -27,6 +27,14 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#    include <windows.h>
+#else
+#    include <dlfcn.h>
+#endif
+
+#include "xOpt/xOptModel.h"
+
 #include "UnitServant.h"
 #include "XOptMINLPAdapter.h"
 #include "backend/corba/CapeUnitCorba.h"
@@ -124,6 +132,74 @@ TEST(XOptMINLPcoUnitPorts, TopologyRoundTripsOverCorba) {
 // *_Model.json 写 {"in_T": "T"}、Python 模型的 getInPortVariableMap 返回
 // {"In_T": "T"}、FlowSheetModel 拿映射的键去 opt_variables.getIndex()。
 // 注意那三处的键值顺序与 C ABI 的两个数组是**相反**的，转换发生在宿主侧。
+// generateEstimate 的固定集是「替换」，不是「累积」。
+//
+// 每次调用带来的是当次的**完整**固定集。只插不清的话，把一个原本用户固定的
+// 进料接上流股之后，宿主这次不再点它的名字，模型却仍认为它被固定 —— 于是继续
+// 为它追加一条进料固定等式，把方程组多约束住。而「空表 = 一个都不固定」这个
+// 语义(见 AnEmptyFixedSetMeansPinNothingNotUseYourDefault)会反过来变成
+// 「空表 = 沿用上次」，与设计正相反。
+//
+// 这条走 C ABI 直调,不经适配器:适配器的 setFixedVariables 是整体重建
+// (disconnect + connect),模型对象换了新的,累积的毛病在那条路上看不见。
+// 而宿主(xOptModelBlackBox::generateEstimate)是在**同一个** handle 上反复调的,
+// 那才是真实的调用方式。
+TEST(XOptMINLPcoUnitPorts, GenerateEstimateReplacesTheFixedSetRatherThanAccumulating) {
+#ifdef _WIN32
+    HMODULE mod = ::LoadLibraryA(MOCK_XOPTMODEL_DLL);
+    ASSERT_NE(mod, nullptr) << "cannot load " << MOCK_XOPTMODEL_DLL;
+    auto create = reinterpret_cast<int (*)(xOptModelT*, xOptPlatformT*, const char*)>(
+        ::GetProcAddress(mod, "xOptModel_createModel"));
+#else
+    void* mod = ::dlopen(MOCK_XOPTMODEL_DLL, RTLD_NOW);
+    ASSERT_NE(mod, nullptr) << "cannot load " << MOCK_XOPTMODEL_DLL;
+    auto create = reinterpret_cast<int (*)(xOptModelT*, xOptPlatformT*, const char*)>(
+        ::dlsym(mod, "xOptModel_createModel"));
+#endif
+    ASSERT_NE(create, nullptr);
+
+    xOptModelT model{};
+    model.size = sizeof(xOptModelT);
+    ASSERT_EQ(create(&model, nullptr, "mock"), 0);
+    ASSERT_NE(model.handle, nullptr);
+
+    xOptSlate slate{};
+    slate.name = "StreamPort";
+    slate.thermo_method = "";
+    slate.components[0] = "C1";
+    slate.components[1] = "C2";
+    slate.components[2] = nullptr;
+    ASSERT_EQ(model.setSlate(model.handle, 0, &slate), 0);
+
+    int n = 0;
+    ASSERT_EQ(model.generateEstimate(model.handle, nullptr, n, nullptr, nullptr, 0), 0);
+    ASSERT_GT(n, 0);
+    std::vector<double> initx(static_cast<size_t>(n), 0.0);
+
+    // 第一次：固定 x0 = 7
+    // 字符串字面量末尾本来就有终止符，解包读一个名字就停
+    const char kFixed[] = "x0";
+    const double kValue = 7.0;
+    int size = n;
+    ASSERT_EQ(model.generateEstimate(model.handle, initx.data(), size, kFixed, &kValue, 1), 0);
+    EXPECT_DOUBLE_EQ(initx[0], 7.0) << "第一次固定应当生效";
+
+    // 第二次：同一个 handle，空固定集。此时必须回到「一个都不固定」的默认值，
+    // 而不是把上一次的 7 留着。
+    std::fill(initx.begin(), initx.end(), -1.0);
+    size = n;
+    ASSERT_EQ(model.generateEstimate(model.handle, initx.data(), size, nullptr, nullptr, 0), 0);
+    EXPECT_DOUBLE_EQ(initx[0], 0.0)
+        << "空固定集必须清掉上一次的选择，否则「空表 = 一个都不固定」形同虚设";
+
+    model.destroyModel(model.handle);
+#ifdef _WIN32
+    ::FreeLibrary(mod);
+#else
+    ::dlclose(mod);
+#endif
+}
+
 TEST(XOptMINLPcoUnitPorts, ThePortMapColumnsKeepTheirMeaning) {
     const std::string desc_path = std::string(MOCK_XOPTMODEL_DLL) + ".portcols.json";
     const ScopedFile desc(desc_path, kGainDesc);

@@ -131,6 +131,11 @@ class GainModel {
         }
         if (size != n) return -1;
         // 解包 "name1\0name2\0..."，与 fixed_var_values 一一对应
+        // 这一次给的就是**完整**的固定集，不是增量：先清空再装。夹具必须和
+        // 真实模型守同一条契约，否则拿它做的测试保护不了任何东西。
+        // （清空放这里而不是函数开头：上面的 initx == nullptr 是问个数的第一段
+        //  查询，在开头清会把缓存抹掉。）
+        fixed_values_.clear();
         const char* p = fixed_var_names;
         for (int i = 0; i < fixed_var_size; ++i) {
             if (p == nullptr) return -1;

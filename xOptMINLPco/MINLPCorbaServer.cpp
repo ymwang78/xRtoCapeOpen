@@ -371,11 +371,16 @@ int main(int argc, char** argv) {
         // ---- ICapeUnit（+ XOPTCO 扩展）：接线信息 ----
         // 只有 C-ABI 模型才有端口；C++ ABI 的 createProblem 输入没有模型这一层，
         // adapter 的 ports() 会是空的，那时发一个零端口的单元也没有意义。
+        // 引用与 ObjectId 提到块外：关停时要用它们解绑名字、注销对象。留在块内
+        // 的话，unit 名字会在进程死后继续解析到一个死引用——正是 unbindName
+        // 那段注释想避免的情形，而 xRto 解析的就是这个名字。
+        CORBA::Object_var unit_ref;
+        PortableServer::ObjectId_var unit_oid;
         if (servant->ownedAdapter() != nullptr && !servant->ownedAdapter()->ports().empty()) {
             UnitServant* unit = new UnitServant(servant->ownedAdapter(), poa.in(), ref.in());
             PortableServer::ServantBase_var unit_owner(unit);
-            PortableServer::ObjectId_var unit_oid = poa->activate_object(unit);
-            CORBA::Object_var unit_ref = poa->id_to_reference(unit_oid.in());
+            unit_oid = poa->activate_object(unit);
+            unit_ref = poa->id_to_reference(unit_oid.in());
             CORBA::String_var unit_ior = orb->object_to_string(unit_ref.in());
 
             // 与 MINLP 那边同样的顺序：先绑名字再落盘（理由见上面那段注释）。
@@ -421,7 +426,12 @@ int main(int argc, char** argv) {
         std::cerr << "xOptMINLPcoCorbaServer: shutting down\n";
         // 先解绑再停服：反过来的话，名字会在 ORB 已经不收请求之后仍短暂可解析，
         // 客户端拿到引用、第一次调用才失败，比「名字不存在」难查得多。
+        // 单元名字先解：它才是流程图里被解析的那个（corbaname:...#xopt/unit）。
+        if (!unit_bind_path.empty() && !CORBA::is_nil(unit_ref.in())) {
+            unbindName(orb.in(), unit_bind_path, unit_ref.in());
+        }
         if (!bind_path.empty()) unbindName(orb.in(), bind_path, ref.in());
+        if (!CORBA::is_nil(unit_ref.in())) poa->deactivate_object(unit_oid.in());
         poa->deactivate_object(oid.in());
         orb->shutdown(/*wait_for_completion*/ false);
         orb->destroy();
