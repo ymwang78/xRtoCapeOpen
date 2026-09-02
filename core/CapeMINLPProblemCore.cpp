@@ -184,6 +184,10 @@ CapeMINLPProblemCore::CapeMINLPProblemCore(std::unique_ptr<ICapeMINLPModel> mode
     : model_(std::move(model)) {}
 
 CapeMINLPProblemCore::~CapeMINLPProblemCore() {
+    // 登记过的话先把槽置空：模型上下文可能比问题活得久，不注销就会拿着一个
+    // 已释放的指针去 refresh()。
+    if (live_slot_ != nullptr && *live_slot_ == this) *live_slot_ = nullptr;
+
     if (model_) {
         model_->disconnect();
     }
@@ -204,6 +208,20 @@ std::vector<int> CapeMINLPProblemCore::allConstraintIds() const {
 int CapeMINLPProblemCore::initialize() {
     if (!model_) return -1;
     if (model_->connect() < 0) return -1;
+    const int ret = readStructure();
+    if (ret < 0) return ret;
+    initialized_ = true;
+    return 0;
+}
+
+// 远端问题被就地重建之后重新拉一遍缓存。不重连：连接还是那条，换的是连接
+// 那一头的问题对象。
+int CapeMINLPProblemCore::refresh() {
+    if (!model_ || !initialized_) return -1;
+    return readStructure();
+}
+
+int CapeMINLPProblemCore::readStructure() {
     if (model_->getSize(size_) < 0) return -1;
 
     const std::vector<int> vids = allVariableIds();
@@ -226,9 +244,10 @@ int CapeMINLPProblemCore::initialize() {
         return -1;
     }
 
+    // 规模可能变了，setX 的缓冲跟着重开；x_set_ 归位，因为旧的那个点已经
+    // 不属于这个问题了——继续拿它求值会静默地算错。
     x_.assign(size_.num_variables, 0.0);
     x_set_ = false;
-    initialized_ = true;
     return 0;
 }
 

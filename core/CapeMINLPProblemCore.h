@@ -25,6 +25,19 @@ class CapeMINLPProblemCore {
     // connect 后端、读取规模、预取并缓存名称/界/稀疏结构。返回 >=0 成功。
     int initialize();
 
+    // 重新拉一遍规模与结构缓存，**不重连**。返回 >=0 成功。
+    //
+    // 用在远端问题被就地重建之后：本类在 initialize() 里把规模、名称、界、
+    // Jacobian 稀疏结构全缓存住了，远端换了一套之后这些缓存就是错的，而
+    // 宿主还拿着本对象的 vtable。不刷新的话，numConstraints() 报的是旧数，
+    // 下一次 evaluateConstraints() 因长度对不上直接返回 -1。
+    int refresh();
+
+    // 登记一个"活动实例槽"。本对象析构时会把该槽置空，模型上下文因此不会
+    // 拿着一个已释放的指针去 refresh()。传 nullptr 解除登记（模型先于问题
+    // 销毁时用）。所有权仍在宿主手里，这里只是双向注销。
+    void setLiveSlot(CapeMINLPProblemCore** slot) { live_slot_ = slot; }
+
     // 把本对象绑定到 C 风格 vtable：problem->handle = this，函数指针 = 内部 trampoline。
     void fillVtable(xOptProblemT* problem);
 
@@ -53,7 +66,11 @@ class CapeMINLPProblemCore {
     std::vector<int> allVariableIds() const;
     std::vector<int> allConstraintIds() const;
 
+    // initialize()/refresh() 共用的结构读取（不含 connect）
+    int readStructure();
+
     std::unique_ptr<ICapeMINLPModel> model_;
+    CapeMINLPProblemCore** live_slot_ = nullptr;
     bool initialized_ = false;
     CapeMINLPSize size_{};
 

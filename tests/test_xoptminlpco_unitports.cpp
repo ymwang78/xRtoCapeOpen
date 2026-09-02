@@ -368,6 +368,41 @@ TEST(XOptMINLPcoUnitPorts, ARejectedPushLeavesThePreviousModelIntact) {
 // 目标不是单元时不能报错：老部署里 XRTO_CAPEOPEN_TARGET 指的就是一个纯
 // ICapeMINLP，那时"没有端口"是正常状态，不是连接失败。这条一红，说明消费端
 // 把"没端口"和"连不上"混起来了，会让既有部署在升级后突然起不来。
+// 推过组分表之后，宿主推下来的**非法**固定变量仍然要被拒绝。
+//
+// 那条"名字对不上就跳过"的宽容分支是给**旧部署描述**准备的：组分表一换，
+// 描述文件里按组分写死的名字(in_fi_C1 之类)必然失效，对它报错等于要求描述
+// 文件预知将来用哪套组分。但 setFixedVariables 推下来的是本次调用的明确意图,
+// 同样放行的话，一个拼错的名字会被静默丢掉、调用还返回 0，用户要固定的条件
+// 实际没生效 —— 而同一个非法集合在没推过组分时是会被拒绝的。同样的输入两种
+// 结果，属于最难查的那类。
+TEST(XOptMINLPcoUnitPorts, AnInvalidHostFixedSetIsStillRejectedAfterAComponentPush) {
+    const std::string desc_path = std::string(MOCK_XOPTMODEL_DLL) + ".fixedvalidate.json";
+    const ScopedFile desc(desc_path, kGainDesc);
+
+    XOptMINLPAdapter adapter(MOCK_XOPTMODEL_DLL, desc.str());
+    ASSERT_EQ(adapter.connect(), 0) << adapter.lastError();
+
+    // 基线：没推过组分表时，非法固定变量被拒绝
+    EXPECT_LT(adapter.setFixedVariables({"not_a_var"}, {42.0}), 0)
+        << "没推组分时就该拒绝";
+
+    // 推一套新组分（fixture 只认 x0 作为可固定变量，组分怎么换都不影响这一点）
+    ASSERT_EQ(adapter.setComponents({"H2", "N2"}), 0) << adapter.lastError();
+    EXPECT_EQ(adapter.components(), (std::vector<std::string>{"H2", "N2"}));
+
+    // 关键：推过组分之后，同一个非法集合**仍然**要被拒绝
+    EXPECT_LT(adapter.setFixedVariables({"not_a_var"}, {42.0}), 0)
+        << "推过组分表不该把宿主自己推下来的固定变量也一起放行";
+    EXPECT_NE(adapter.lastError().find("not_a_var"), std::string::npos)
+        << "报错要指得出是哪个名字，实际: " << adapter.lastError();
+
+    // 而合法的固定集合照常生效 —— 拒绝那一次不能把适配器留在坏状态
+    EXPECT_EQ(adapter.setFixedVariables({"x0"}, {5.0}), 0) << adapter.lastError();
+    EXPECT_EQ(adapter.components(), (std::vector<std::string>{"H2", "N2"}))
+        << "回滚不该把组分表也退回去";
+}
+
 TEST(XOptMINLPcoUnitPorts, ANonUnitTargetIsNotAnError) {
     int argc = 0;
     CORBA::ORB_ptr orb = CORBA::ORB_init(argc, static_cast<char**>(nullptr));

@@ -110,6 +110,11 @@ void ensureBackendsRegistered() {
 // 走一次独立的"连上、读完、断开"。
 struct CapeOpenModelContext {
     std::string conn;
+    // 最近一次 buildProblem 交出去的那个问题对象（**非拥有**：所有权在宿主，
+    // 经 problem->destroyProblem 释放）。留着它是因为 generateEstimate 会让
+    // 远端把问题整个重建，而这个对象里缓存着重建前的规模与结构。
+    // 双向注销：core 析构时把这里置空，本上下文析构时解除 core 的登记。
+    CapeMINLPProblemCore* live_problem = nullptr;
 #ifdef CAPEOPEN_WITH_CORBA
     bool topology_read = false;
     CapeUnitCorba topology;
@@ -127,6 +132,31 @@ struct CapeOpenModelContext {
 // 画出来没有接入点，且没有任何提示。一次瞬时失败不该有终身后果。
 //
 // 远端不是单元（老部署的纯 ICapeMINLP 目标）则是**确定**的答案，置位不再重试。
+// 按方向分组的索引存的是**指向 topology.ports() 元素的裸指针**，所以只要拓扑
+// 动过就必须重建——成功要重建，失败更要重建。
+//
+// 失败为什么更危险：CapeUnitCorba::read() 一进门就 ports_.clear()，然后才发远程
+// 请求。中途 COMM_FAILURE 的话，留下的是一个空的 ports_，而 in_ports/out_ports
+// 里那些指针指向的元素已经没了。之后 portVariableMap 一解引用就是读已释放内存。
+// 从这个空表重建，结果自然是空索引——没有悬垂指针，端口数如实变成 0。
+void rebuildPortIndex(CapeOpenModelContext* ctx) {
+    ctx->in_ports.clear();
+    ctx->out_ports.clear();
+    for (const CapeUnitPort& p : ctx->topology.ports()) {
+        (p.is_input ? ctx->in_ports : ctx->out_ports).push_back(&p);
+    }
+}
+
+// 拓扑刷新失败后的统一善后：索引清干净，并允许下次重试。
+// topology_read 必须放开——否则一次瞬时通信故障就把这个模型实例永久钉死成
+// 0 端口，和先前那个"画不出接入点"的老毛病是同一个形状。
+void onTopologyRefreshFailed(CapeOpenModelContext* ctx, const char* what) {
+    std::fprintf(stderr, "xRtoCapeOpen: %s failed: %s\n", what,
+                 ctx->topology.lastError().c_str());
+    rebuildPortIndex(ctx);
+    ctx->topology_read = false;
+}
+
 void ensureTopology(CapeOpenModelContext* ctx) {
     if (ctx == nullptr || ctx->topology_read) return;
     if (ctx->conn.rfind("corba:", 0) != 0) {
@@ -138,14 +168,11 @@ void ensureTopology(CapeOpenModelContext* ctx) {
         // 正是先前那个"画不出接入点又查不到原因"的成因。
         std::fprintf(stderr, "xRtoCapeOpen: cannot read the unit topology from %s: %s\n",
                      ctx->conn.c_str(), ctx->topology.lastError().c_str());
+        rebuildPortIndex(ctx);  // read() 已经清过 ports_，索引不重建就是悬垂
         return;
     }
     ctx->topology_read = true;
-    ctx->in_ports.clear();
-    ctx->out_ports.clear();
-    for (const CapeUnitPort& p : ctx->topology.ports()) {
-        (p.is_input ? ctx->in_ports : ctx->out_ports).push_back(&p);
-    }
+    rebuildPortIndex(ctx);
 }
 #endif
 
@@ -297,6 +324,11 @@ int t_buildProblem(xOptModelHandle h, xOptProblemT* problem) {
             return -1;
         }
         // 所有权转移到 xOptProblemT：宿主经 problem->destroyProblem 释放 core。
+        // 但本上下文要留一个非拥有指针：generateEstimate 会重建远端问题，
+        // 那之后这个对象的缓存必须跟着刷新。
+        if (ctx->live_problem != nullptr) ctx->live_problem->setLiveSlot(nullptr);
+        ctx->live_problem = core;
+        core->setLiveSlot(&ctx->live_problem);
         core->fillVtable(problem);
         return 0;
     } catch (...) {
@@ -306,7 +338,13 @@ int t_buildProblem(xOptModelHandle h, xOptProblemT* problem) {
 
 void t_destroyModel(xOptModelHandle h) {
     try {
-        delete ctxOf(h);
+        CapeOpenModelContext* ctx = ctxOf(h);
+        // 问题对象可能比模型活得久（所有权在宿主）。解除登记，免得它析构时
+        // 往一块已经释放的内存里写 nullptr。
+        if (ctx != nullptr && ctx->live_problem != nullptr) {
+            ctx->live_problem->setLiveSlot(nullptr);
+        }
+        delete ctx;
     } catch (...) {
     }
 }
@@ -479,15 +517,19 @@ int t_setSlate(xOptModelHandle h, int slate_index, const xOptSlate* slate) {
     if (wanted == ctx->topology.components()) return 0;  // 没变，不惊动远端
 
     if (ctx->topology.setComponents(wanted) < 0) {
-        std::fprintf(stderr, "xRtoCapeOpen: setSlate failed: %s\n",
-                     ctx->topology.lastError().c_str());
+        // setComponents 内部以 read() 收尾，失败可能停在"已 clear、未填回"的
+        // 中间态，所以善后必须在返回**之前**做。
+        onTopologyRefreshFailed(ctx, "setSlate");
         return -1;
     }
-    // 远端重建过了，本地按方向分组的那两份索引也得跟着重建。
-    ctx->in_ports.clear();
-    ctx->out_ports.clear();
-    for (const CapeUnitPort& p : ctx->topology.ports()) {
-        (p.is_input ? ctx->in_ports : ctx->out_ports).push_back(&p);
+    rebuildPortIndex(ctx);  // 远端重建过了，本地索引跟着重建
+    // 同 generateEstimate：组分一换，变量与约束数必然变，已交付的问题对象
+    // 不刷新就是错的。
+    if (ctx->live_problem != nullptr && ctx->live_problem->refresh() < 0) {
+        std::fprintf(stderr,
+                     "xRtoCapeOpen: setSlate rebuilt the remote problem but refreshing the "
+                     "delivered problem failed\n");
+        return -1;
     }
     return 0;
 #else
@@ -512,7 +554,7 @@ int t_generateEstimate(xOptModelHandle h, double initx[], int& size,
     ensureTopology(ctx);
     if (!ctx->topology.isUnit()) return 0;  // 不是单元：保留调用方的值与 size
 
-    // 宿主的打包格式：变量名以 ' ' 分隔拼在连续缓冲里，值数组一一对应。
+    // 宿主的打包格式：变量名以 '\0' 分隔拼在连续缓冲里，值数组一一对应。
     std::vector<std::string> names;
     std::vector<double> values;
     const char* p = fixed_var_names;
@@ -527,15 +569,21 @@ int t_generateEstimate(xOptModelHandle h, double initx[], int& size,
     // 时一个都不该固定，而描述文件里通常把它们全列着。空表也照推。
     std::vector<double> x0;
     if (ctx->topology.generateEstimate(names, values, x0) < 0) {
-        std::fprintf(stderr, "xRtoCapeOpen: generateEstimate failed: %s\n",
-                     ctx->topology.lastError().c_str());
+        onTopologyRefreshFailed(ctx, "generateEstimate");
         return -1;
     }
-    // 远端重建过，本地端口分组要重建
-    ctx->in_ports.clear();
-    ctx->out_ports.clear();
-    for (const CapeUnitPort& port : ctx->topology.ports()) {
-        (port.is_input ? ctx->in_ports : ctx->out_ports).push_back(&port);
+    rebuildPortIndex(ctx);  // 远端重建过，本地索引跟着重建
+
+    // 端口重读还不够：宿主可能已经拿着一个 buildProblem 交付的问题对象，
+    // 而它缓存着重建**之前**的规模、名称、界与 Jacobian 结构。固定集合一变，
+    // 服务端的约束数就跟着变（进料固定等式是按固定集合生成的），此时
+    // numConstraints() 报的是旧数，下一次 evaluateConstraints() 长度对不上
+    // 直接返回 -1 —— 求解在这里断掉，且看不出原因。
+    if (ctx->live_problem != nullptr && ctx->live_problem->refresh() < 0) {
+        std::fprintf(stderr,
+                     "xRtoCapeOpen: the remote problem was rebuilt but refreshing the "
+                     "delivered problem failed; it would keep a stale structure\n");
+        return -1;
     }
 
     if (initx == nullptr) {  // 第一段：只报个数

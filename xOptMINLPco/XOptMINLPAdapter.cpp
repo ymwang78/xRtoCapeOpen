@@ -407,13 +407,21 @@ int XOptMINLPAdapter::initModel(xOptModelT& model) {
                     }
                 }
                 if (at < 0) {
-                    // 组分表被外部推下来过时，描述文件里按组分写死的名字
-                    // （in_fi_C1 之类）**必然**失效——它是为另一套组分写的。
-                    // 这时跳过，而不是报错：报错等于要求描述文件预知将来会用
-                    // 哪套组分，而那正是下推想解决的问题。
-                    // 没推过组分表时仍然报错：那时描述文件是权威的，对不上就是
-                    // 真的配错了。
-                    if (!components_override_.empty()) continue;
+                    // 宽容只给**旧部署描述**里的名字，不给宿主明确推下来的那份。
+                    //
+                    // 组分表被推过之后，描述文件里按组分写死的名字（in_fi_C1
+                    // 之类）**必然**失效——它是为另一套组分写的。对它报错等于
+                    // 要求描述文件预知将来会用哪套组分，而那正是下推要解决的
+                    // 问题，所以跳过。
+                    //
+                    // 但 has_fixed_override_ 为真时，desc_.fixable_variables 已经
+                    // 被换成宿主刚推下来的那份（见 initModel 开头）——那是本次
+                    // 调用的明确意图，对不上就是真的配错了，必须报错。放行的话，
+                    // setComponents 之后一个拼错的固定变量会被静默丢掉、
+                    // setFixedVariables 还返回 0，用户要固定的条件实际没生效，
+                    // 而同一个非法集合在没推过组分时是会被拒绝的——同样的输入
+                    // 两种结果，最难查的那类。
+                    if (!components_override_.empty() && !has_fixed_override_) continue;
                     return fail("connect: '" + want + "' from " + from +
                                 " is not a fixable variable of the model");
                 }
@@ -437,7 +445,8 @@ int XOptMINLPAdapter::initModel(xOptModelT& model) {
                 }
             }
             if (!used) {
-                if (!components_override_.empty()) continue;  // 同上
+                // 与上面同一条判据：宿主推下来的固定值必须校验，旧描述的才宽容。
+                if (!components_override_.empty() && !has_fixed_override_) continue;
                 return fail("connect: fixed value for '" + kv.first + "' from " + from +
                             " does not name a variable being fixed");
             }
