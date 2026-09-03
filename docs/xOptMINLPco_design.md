@@ -763,11 +763,14 @@ RID 钉在 `test_capeopen100_unit_rid.cpp`。
 但仍是每次求值一次往返。要快只有两条路：`ICapeMINLP` 侧批量化（规范没有），
 或把问题也搬到求解器那一侧——那就回到了模型通路。
 
-**部署**（xRto）：`Release/xRtoCapeOpenSolver.dll` + `Release/xRtoCapeOpenSolver.target`
-（`corba:corbaname::localhost:24567#xopt/solver`），`Solver/Solver.json` 登记
-`Penalty_Corba`；服务端 `UnitModel/Corba/start_solver.bat`
-（`xOptMINLPcoSolverServer --solver-dll test_penalty_solver.dll --name xopt/solver`，
-与模型服务端共用那个 naming）。
+**部署**（xRto）：求解器侧的东西集中在 `Solver/Corba/`（与 `UnitModel/Corba/`
+同级、同款布局）：桥接 DLL `xRtoCapeOpenSolver.dll` 与它的
+`xRtoCapeOpenSolver.target`（`corba:corbaname::localhost:24567#xopt/solver`）、
+服务端 `xOptMINLPcoSolverServer.exe` + `test_penalty_solver.dll` + `start_solver.bat`
+（`--solver-dll test_penalty_solver.dll --name xopt/solver`，与模型服务端共用
+`UnitModel/Corba/start_nameservice.bat` 起的那个 naming）。`Solver/Solver.json`
+登记 `Penalty_Corba`，`SolverPath` 写 `../Solver/Corba/xRtoCapeOpenSolver.dll`——
+宿主按 exe 目录（`Release/`）解析相对路径（`zce::matchModulePath`）。
 
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。
