@@ -478,7 +478,19 @@ class CapeOpenRemoteSolver : public xOptSolver {
     int continueSolve() override {
         if (!ext()) return -1;
         try {
-            return ext_->ContinueSolve();
+            // 继续求解会把远端的解推进（Ipopt 那类后端在这里同步 ReOptimize），
+            // 上一次 solve() 抓下来的 x_/f_ 就作废了：结果码与解按同一套逻辑重取。
+            // RESULT_UNKNOWN(-1) 是"不支持/没动"的约定值，那时上一次的结果保留。
+            const int rc = ext_->ContinueSolve();
+            if (rc != RESULT_UNKNOWN) {
+                result_ = rc;
+                x_.clear();
+                f_.clear();
+                fetchSolution();
+                log(ZLOG_INFOR, "[%s] remote continue finished: result=%d, objective=%.6e",
+                    name_.c_str(), result_, f_.empty() ? 0.0 : f_[0]);
+            }
+            return rc;
         } catch (const CORBA::Exception& e) {
             log(ZLOG_WARNI, "[%s] continueSolve: %s", name_.c_str(), describe(e).c_str());
             return -1;
@@ -565,10 +577,18 @@ class CapeOpenRemoteSolver : public xOptSolver {
             adapter_->getVariableValues({}, x_);  // 远端最后一次 SetMINLPVariableValues 的值
         }
         if (f_.empty() && n > 0 && m >= 0 && !x_.empty()) {
-            f_.assign(static_cast<size_t>(m) + 1, 0.0);
-            problem_->setX(x_.data(), static_cast<int>(x_.size()));
-            problem_->evaluateObjective(f_[0]);
-            if (m > 0) problem_->evaluateConstraints(f_.data() + 1, m);
+            // 本地重算 F。三步里任何一步失败都不能留下一半是 0 的 F 冒充结果：
+            // 宁可 F() 答 -1，让宿主知道"没有"。
+            std::vector<double> f(static_cast<size_t>(m) + 1, 0.0);
+            const bool ok = problem_->setX(x_.data(), static_cast<int>(x_.size())) >= 0 &&
+                            problem_->evaluateObjective(f[0]) >= 0 &&
+                            (m == 0 || problem_->evaluateConstraints(f.data() + 1, m) >= 0);
+            if (ok) {
+                f_.swap(f);
+            } else {
+                log(ZLOG_WARNI, "[%s] could not re-evaluate F at the solution; F() is unavailable",
+                    name_.c_str());
+            }
         }
     }
 

@@ -286,8 +286,26 @@ if(XOPTMINLPCO_BUILD_TESTS)
                 LIBRARY_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}")
         endforeach()
         file(TO_CMAKE_PATH "${TEST_PENALTY_SOLVER_DIR}" TEST_PENALTY_SOLVER_DIR_FWD)
+
+        # 第二个夹具：支持暂停/继续的剧本式求解器，钉住"继续之后结果要刷新"。
+        # 与上面同一个钉死的输出目录。
+        add_library(mock_xoptsolver SHARED ${CMAKE_CURRENT_SOURCE_DIR}/../tests/mock_xoptsolver_dll.cpp)
+        target_include_directories(mock_xoptsolver PRIVATE ${XOPT_INCLUDE_DIR})
+        set_target_properties(mock_xoptsolver PROPERTIES PREFIX "" OUTPUT_NAME "mock_xoptsolver")
+        foreach(cfg IN ITEMS "" DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            if(cfg STREQUAL "")
+                set(prop_suffix "")
+            else()
+                set(prop_suffix "_${cfg}")
+            endif()
+            set_target_properties(mock_xoptsolver PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}"
+                LIBRARY_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}")
+        endforeach()
+
         set(TEST_PENALTY_SOLVER_DLL_DEF
-            TEST_PENALTY_SOLVER_DLL="${TEST_PENALTY_SOLVER_DIR_FWD}/test_penalty_solver${CMAKE_SHARED_LIBRARY_SUFFIX}")
+            TEST_PENALTY_SOLVER_DLL="${TEST_PENALTY_SOLVER_DIR_FWD}/test_penalty_solver${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            MOCK_XOPTSOLVER_DLL="${TEST_PENALTY_SOLVER_DIR_FWD}/mock_xoptsolver${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
         # 回环（collocated）：mock 问题 -> MINLPServant；SolverManagerServant 加载
         # 真实求解器 DLL -> CreateMINLPSystem -> Solve -> 解析最优；参数集合；Release。
@@ -298,7 +316,10 @@ if(XOPTMINLPCO_BUILD_TESTS)
         target_include_directories(test_xoptminlpco_solver PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
         target_compile_definitions(test_xoptminlpco_solver PRIVATE ${TEST_PENALTY_SOLVER_DLL_DEF})
-        add_dependencies(test_xoptminlpco_solver test_penalty_solver)
+        # mock_xoptproblem.dll 也是它的夹具（一个缺 createSolver 导出的 DLL）；
+        # 测试按自己 exe 的目录找它——两者都在默认运行输出目录里，Ninja 与
+        # VS 多配置下都成立，与两条 IPC 测试同一约定。
+        add_dependencies(test_xoptminlpco_solver test_penalty_solver mock_xoptsolver mock_xoptproblem)
         add_test(NAME XOptMINLPcoSolverTest COMMAND test_xoptminlpco_solver)
 
         # 真·跨进程，按 xRto 的用法：起 xOptMINLPcoSolverServer.exe，本进程
@@ -313,7 +334,7 @@ if(XOPTMINLPCO_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/../tests ${XOPT_INCLUDE_DIR})
         target_compile_definitions(test_xoptminlpco_solver_ipc PRIVATE ${TEST_PENALTY_SOLVER_DLL_DEF})
         add_dependencies(test_xoptminlpco_solver_ipc
-            xOptMINLPcoSolverServer xrtocapeopensolver_dll test_penalty_solver)
+            xOptMINLPcoSolverServer xrtocapeopensolver_dll test_penalty_solver mock_xoptsolver)
         add_test(NAME XOptMINLPcoSolverIpcTest COMMAND test_xoptminlpco_solver_ipc)
     endif()
 endif()

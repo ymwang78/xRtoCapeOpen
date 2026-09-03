@@ -218,6 +218,53 @@ TEST(XOptMINLPcoSolverIpc, HostStyleSolveThroughTheBridgeDll) {
     // 桥接 DLL 里的 ORB 与进程同寿，故意不 FreeLibrary（见 CapeOpenSolverBridge.cpp）。
 }
 
+// 继续求解之后桥接 DLL 的 X()/F() 必须刷新：上一次 solve() 抓下来的缓存作废，
+// 结果码与解按同一套逻辑重取。服务端换成支持暂停/继续的剧本式求解器
+// （solve 停在全 1 并返回 RESULT_USER_PAUSE，continue 推到全 2）。
+TEST(XOptMINLPcoSolverIpc, ContinueSolveRefreshesTheBridgeSolution) {
+    const std::string dir = exeDir();
+    const std::string server = dir + "\\xOptMINLPcoSolverServer.exe";
+    const std::string bridge = dir + "\\xRtoCapeOpenSolver.dll";
+    const std::string ior_file = dir + "\\xoptminlpco_solver_ipc_pause.ior";
+
+    ServerProcess server_proc(server, MOCK_XOPTSOLVER_DLL, ior_file);
+    ASSERT_TRUE(server_proc.started()) << "cannot start the server: " << server;
+    std::string err;
+    const std::string ior = server_proc.waitForIor(std::chrono::seconds(30), err);
+    ASSERT_FALSE(ior.empty()) << err;
+    _putenv_s("XRTO_CAPEOPEN_SOLVER_TARGET", ("corba:" + ior).c_str());
+
+    HMODULE lib = LoadLibraryA(bridge.c_str());
+    ASSERT_NE(lib, nullptr);
+    auto create = reinterpret_cast<CreateSolverFunc>(GetProcAddress(lib, "createSolver"));
+    auto destroy = reinterpret_cast<DestroySolverFunc>(GetProcAddress(lib, "destroySolver"));
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(destroy, nullptr);
+
+    MockXOptProblem mock;
+    xOptSolver* solver = create("FLOWSHEET", &mock, &hostLog);
+    ASSERT_NE(solver, nullptr);
+
+    EXPECT_EQ(solver->solve(), xOptSolver::RESULT_USER_PAUSE);
+    std::vector<double> x(2, 0.0), f(2, 0.0);
+    ASSERT_EQ(solver->X(x.data(), 2), 2);
+    EXPECT_DOUBLE_EQ(x[0], 1.0);
+    ASSERT_EQ(solver->F(f.data(), 2), 2);
+    EXPECT_DOUBLE_EQ(f[0], 2.0);
+
+    EXPECT_EQ(solver->continueSolve(), xOptSolver::RESULT_OPTIMAL);
+    ASSERT_EQ(solver->X(x.data(), 2), 2);
+    EXPECT_DOUBLE_EQ(x[0], 2.0);
+    EXPECT_DOUBLE_EQ(x[1], 2.0);
+    ASSERT_EQ(solver->F(f.data(), 2), 2);
+    EXPECT_DOUBLE_EQ(f[0], 8.0);
+    double obj = 0;
+    ASSERT_EQ(mock.evaluateObjective(obj), 0);
+    EXPECT_DOUBLE_EQ(obj, 8.0) << "the continued solution must have been written back";
+
+    destroy(solver);
+}
+
 // 没配连接目标时 createSolver 必须失败，并且是在 createSolver 就失败。
 // 静默连上一个默认值（或返回一个不能用的求解器）会让 xRto 在 solve 时才炸，
 // 而且炸得不知所云。

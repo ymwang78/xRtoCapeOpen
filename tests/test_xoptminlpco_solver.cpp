@@ -23,6 +23,10 @@
 #include <tao/ORB.h>
 #include <tao/PortableServer/PortableServer.h>
 
+#ifdef _WIN32
+#    include <windows.h>  // ACE/TAO 之后：它拉 winsock2.h，windows.h 得排在后面
+#endif
+
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -53,9 +57,16 @@ void testLog(ZLOG_LEVEL level, const char* format, ...) {
     std::printf("  [solver log %d] %s\n", static_cast<int>(level), buf);
 }
 
-std::string exeDirOf(const std::string& path) {
-    const size_t slash = path.find_last_of("/\\");
-    return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+std::string exeDir() {
+#ifdef _WIN32
+    char buf[MAX_PATH] = {0};
+    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    const std::string p(buf, n);
+    const size_t slash = p.find_last_of("\\/");
+    return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
+#else
+    return ".";
+#endif
 }
 
 ct::CapeArrayString names1(const char* a) {
@@ -315,8 +326,10 @@ TEST_F(SolverLoopbackTest, GetParameters_PublishesTunablesAsCapeParameters) {
 
 // 缺导出的 DLL：load 失败要说清楚，再 load 一次也只是再失败一次，不叠句柄。
 TEST(XOptSolverLibraryTest, MissingExports_LoadFailsAndCanBeRetried) {
-    // mock_xoptproblem.dll 导出的是 createProblem，不是 createSolver
-    XOptSolverLibrary lib(exeDirOf(TEST_PENALTY_SOLVER_DLL) + "/../mock_xoptproblem.dll");
+    // mock_xoptproblem.dll 导出的是 createProblem，不是 createSolver。它和本测试
+    // exe 都在默认运行输出目录里（Ninja 是构建根，VS 多配置是 <build>/Release），
+    // 所以按 exe 自己的目录找——与两条 IPC 测试同一约定。
+    XOptSolverLibrary lib(exeDir() + "/mock_xoptproblem.dll");
     EXPECT_LT(lib.load(), 0);
     EXPECT_NE(lib.lastError().find("createSolver"), std::string::npos) << lib.lastError();
     EXPECT_FALSE(lib.loaded());
@@ -326,6 +339,52 @@ TEST(XOptSolverLibraryTest, MissingExports_LoadFailsAndCanBeRetried) {
     XOptSolverLibrary missing("no_such_dir/no_such_solver.dll");
     EXPECT_LT(missing.load(), 0);
     EXPECT_FALSE(missing.lastError().empty());
+}
+
+// 继续求解之后，结果码、X/F 与写回远端问题的解都要跟着刷新。夹具是一个剧本式
+// 求解器：solve 停在全 1（RESULT_USER_PAUSE），continueSolve 推到全 2（RESULT_OPTIMAL）。
+// 罚函数求解器不支持继续（答 -1），验不到这条；Ipopt 那类后端在这里会同步 ReOptimize。
+TEST_F(SolverLoopbackTest, ContinueSolve_RefreshesResultAndWritesTheSolutionBack) {
+    XOptSolverLibrary pausing(MOCK_XOPTSOLVER_DLL);
+    ASSERT_EQ(pausing.load(), 0) << pausing.lastError();
+    SolverManagerServant* ms = new SolverManagerServant(&pausing, poa_.in(), &testLog);
+    PortableServer::ServantBase_var ms_owner(ms);
+    PortableServer::ObjectId_var oid = poa_->activate_object(ms);
+    CORBA::Object_var mref = poa_->id_to_reference(oid.in());
+    mi::ICapeMINLPSolverManager_var manager = mi::ICapeMINLPSolverManager::_narrow(mref.in());
+
+    CORBA::Object_var sys_obj;
+    ASSERT_NO_THROW(manager->CreateMINLPSystem(problem_ref_.in(), sys_obj.out()));
+    mi::ICapeMINLPSystem_var sys = mi::ICapeMINLPSystem::_narrow(sys_obj.in());
+    ::XOPTCO::IXOptMINLPSystemExtension_var ext =
+        ::XOPTCO::IXOptMINLPSystemExtension::_narrow(sys_obj.in());
+    ASSERT_FALSE(CORBA::is_nil(ext.in()));
+
+    // 暂停不是失败：Solve 正常返回，结果码是 RESULT_USER_PAUSE，解停在 (1,1)
+    ASSERT_NO_THROW(sys->Solve());
+    EXPECT_EQ(ext->GetSolveResult(), xOptSolver::RESULT_USER_PAUSE);
+    ct::CapeArrayDouble_var x = ext->GetX();
+    ASSERT_EQ(x->length(), 2u);
+    EXPECT_DOUBLE_EQ(x[0u], 1.0);
+    ct::CapeArrayDouble_var f = ext->GetF();
+    EXPECT_DOUBLE_EQ(f[0u], 2.0);  // 1^2 + 1^2
+    double obj = 0;
+    ASSERT_EQ(mock_.evaluateObjective(obj), 0);
+    EXPECT_DOUBLE_EQ(obj, 2.0) << "the pause point must have been written back";
+
+    // 继续：结果码、X/F、写回全部刷新到 (2,2)
+    EXPECT_EQ(ext->ContinueSolve(), xOptSolver::RESULT_OPTIMAL);
+    EXPECT_EQ(ext->GetSolveResult(), xOptSolver::RESULT_OPTIMAL);
+    x = ext->GetX();
+    EXPECT_DOUBLE_EQ(x[0u], 2.0);
+    EXPECT_DOUBLE_EQ(x[1u], 2.0);
+    f = ext->GetF();
+    EXPECT_DOUBLE_EQ(f[0u], 8.0);  // 2^2 + 2^2
+    ASSERT_EQ(mock_.evaluateObjective(obj), 0);
+    EXPECT_DOUBLE_EQ(obj, 8.0) << "the continued solution must have been written back";
+
+    ext->Release();
+    poa_->deactivate_object(oid.in());
 }
 
 TEST_F(SolverLoopbackTest, CreateSystem_RejectsAReferenceThatIsNotAProblem) {

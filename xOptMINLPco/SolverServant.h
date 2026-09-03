@@ -149,6 +149,9 @@ class MINLPSystemServant : public POA_XOPTCO::IXOptMINLPSystemExtension {
     void destroyParameters();
     // 求解器或问题已被 Release 掉时抛 ECapeUnknown。
     void requireLive(const char* operation) const;
+    // Solve / ContinueSolve 共用的收尾：记结果码、把解写回远端问题。
+    // 写回失败（拿不到 X 或远端拒收）返回 false，并把原因放进 why_out。
+    bool recordOutcome(int result, std::string& why_out);
     ::CAPEOPEN100::Common::Types::CapeArrayDouble* fetchVector(const char* operation,
                                                               bool from_x, bool multipliers);
 

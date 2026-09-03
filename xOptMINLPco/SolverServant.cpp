@@ -599,22 +599,8 @@ void MINLPSystemServant::Solve() {
         r = xOptSolver::RESULT_NUMERICAL_ISSUES;
         why = "unknown exception";
     }
-    result_ = r;
-    solved_ = true;
-
-    // 把解写回远端问题。ICapeMINLP 的消费者靠 GetMINLPVariableValues 取解，
-    // 而 xOptSolver 契约只保证 X() 能读出来，并不要求求解器最后一次 setX 停在
-    // 解上——不能指望它。这里是 xRto 那头 X() 之外的第二条取解路径。
-    // 写回失败不能静默：回调连接断了、或客户端拒收，标准客户端读到的就是旧值，
-    // 而 Solve 还说成功。结果码与 GetX 照常可用（xOpt 客户端不靠写回取解），
-    // 但 Solve 本身按失败报。
-    bool write_back_ok = true;
-    if (num_variables_ > 0) {
-        std::vector<double> x(static_cast<size_t>(num_variables_), 0.0);
-        if (solver_->X(x.data(), num_variables_) >= 0) {
-            write_back_ok = problem_->setX(x.data(), num_variables_) >= 0;
-        }
-    }
+    std::string write_back_why;
+    const bool write_back_ok = recordOutcome(r, write_back_why);
 
     // 负码即失败（RESULT_USER_PAUSE 例外：那是"停下了"，不是"坏了"）。抛规范
     // 专设的 ECapeSolvingError；xOpt 客户端 catch 之后经 GetSolveResult 拿到原码。
@@ -624,12 +610,35 @@ void MINLPSystemServant::Solve() {
         if (!why.empty()) desc += ": " + why;
         throw solvingError("Solve", desc);
     }
+    // 写回失败不能静默：标准客户端靠 GetMINLPVariableValues 取解，回调断了或
+    // 客户端拒收时它读到的是旧值，而 Solve 还说成功。结果码与 GetX 照常可用
+    // （xOpt 客户端不靠写回取解），但 Solve 本身按失败报。
     if (!write_back_ok) {
         throw solvingError("Solve", "solver '" + name_ + "' finished with " + resultName(r) +
-                                        ", but writing the solution back to the problem "
-                                        "(SetMINLPVariableValues) failed; the problem's variable "
-                                        "values are stale -- read X through the extension");
+                                        ", but " + write_back_why +
+                                        "; the problem's variable values are stale -- read X "
+                                        "through the extension");
     }
+}
+
+// 把解写回远端问题。ICapeMINLP 的消费者靠 GetMINLPVariableValues 取解，
+// 而 xOptSolver 契约只保证 X() 能读出来，并不要求求解器最后一次 setX 停在
+// 解上——不能指望它。这里是 xRto 那头 X() 之外的第二条取解路径。
+// Solve 与 ContinueSolve 都走这里：继续求解会把解推进，结果与写回得一起刷新。
+bool MINLPSystemServant::recordOutcome(int result, std::string& why_out) {
+    result_ = result;
+    solved_ = true;
+    if (num_variables_ <= 0) return true;
+    std::vector<double> x(static_cast<size_t>(num_variables_), 0.0);
+    if (solver_->X(x.data(), num_variables_) < 0) {
+        why_out = "the solver has no solution vector to report (X() failed)";
+        return false;
+    }
+    if (problem_->setX(x.data(), num_variables_) < 0) {
+        why_out = "writing the solution back to the problem (SetMINLPVariableValues) failed";
+        return false;
+    }
+    return true;
 }
 
 CORBA::Object_ptr MINLPSystemServant::GetParameters() {
@@ -822,7 +831,27 @@ ct::CapeLong MINLPSystemServant::PauseSolve() {
 
 ct::CapeLong MINLPSystemServant::ContinueSolve() {
     requireLive("ContinueSolve");
-    return static_cast<ct::CapeLong>(solver_->continueSolve());
+    int rc = xOptSolver::RESULT_UNKNOWN;
+    try {
+        rc = solver_->continueSolve();
+    } catch (const std::exception& e) {
+        throw unknown(kSystemIface, "ContinueSolve", std::string("continueSolve threw: ") + e.what());
+    } catch (...) {
+        throw unknown(kSystemIface, "ContinueSolve", "continueSolve threw an unknown exception");
+    }
+    // RESULT_UNKNOWN(-1) 是"不支持/没动"的约定值（examples 的罚函数求解器就这么答），
+    // 上一次的结果与写回保持原样。其余返回码意味着求解器真的往前走了——Ipopt
+    // 那类后端在这里同步 ReOptimize——结果码与远端问题里的解都得跟着刷新，否则
+    // GetSolveResult 停在 RESULT_USER_PAUSE、GetMINLPVariableValues 停在暂停点。
+    if (rc != xOptSolver::RESULT_UNKNOWN) {
+        std::string why;
+        if (!recordOutcome(rc, why)) {
+            throw unknown(kSystemIface, "ContinueSolve",
+                          "continueSolve returned " + std::to_string(rc) + " (" + resultName(rc) +
+                              "), but " + why);
+        }
+    }
+    return static_cast<ct::CapeLong>(rc);
 }
 
 void MINLPSystemServant::Release() {
