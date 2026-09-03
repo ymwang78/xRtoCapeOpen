@@ -287,9 +287,9 @@ M2 的 mock 不涉及此问题（硬编码）；M3 真接 COM/CORBA 时再定。
 | `setX` | `SetMINLPVariableValues(vids, x)` | 缓存 x；evaluate 前必须先调 |
 | `runTimeCheck` | 恒 1（或校验 bounds） | |
 | `evaluateObjective` | `GetMINLPNonlinearObjectiveFunctionValue` | |
-| `evaluateConstraints` | `GetMINLPNonlinearConstraintValues(cids)` | |
-| `evaluateObjectiveGradient` | `GetMINLPObjectiveFunctionDerivativeValues("Nonlinear", v)` | 顺序同 `getObjectiveGradientStructure` |
-| `evaluateConstraintsJacobianValues` | `GetMINLPConstraintDerivativeValues("Jacobian", cids, vals)` | 顺序同 `getConstraintJacobianStructure` |
+| `evaluateConstraints` | `GetMINLPNonlinearConstraintValues(cids)` | 长度 0 / 无约束 → 直接返回 0，不发远程调用；负长度 → -1 |
+| `evaluateObjectiveGradient` | `GetMINLPObjectiveFunctionDerivativeValues("Nonlinear", v)` | 顺序同 `getObjectiveGradientStructure`；**结构为空（目标恒为常数的可行性问题）或长度 0 → 返回 0**。宿主按结构长度开空 vector 传 `data()`——空 vector 的 `data()` 标准不保证非空（MSVC 下就是 `nullptr`），长度为 0 时必须先看长度、不能把指针当错误参数拒绝——否则 `xOptProblemComp` 断言失败、RSQP 报 "Fail to get linearized objective"。负长度 → -1 |
+| `evaluateConstraintsJacobianValues` | `GetMINLPConstraintDerivativeValues("Jacobian", cids, vals)` | 顺序同 `getConstraintJacobianStructure`；长度 0 / 结构为空 → 返回 0；负长度 → -1 |
 | `destroyProblem` | 释放 `ICapeMINLP`/system | RAII；DLL 内回收 |
 
 > 拉格朗日乘子（`Get/SetMINLPLagrangeMultipliers`）黑箱用法通常不需要；若 xRto 需对偶热启动，可扩展。
