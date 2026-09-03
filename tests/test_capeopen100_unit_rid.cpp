@@ -83,6 +83,29 @@ TEST(CapeOpen100UnitRidTest, OurExtensionIsNotUnderCapeOpen) {
         << "our extension must not carry a CAPE-OPEN Repository ID: " << id;
 }
 
+// 求解器侧的三个扩展接口同理。两个参数 spec 是把规范里两个互不继承的接口
+// 合成一个骨架的产物，它们的 RID 必须是我们自己的——一个第三方客户端
+// _narrow 到 ICapeRealParameterSpec 照样成立，那才是标准的那一半。
+TEST(CapeOpen100UnitRidTest, OurSolverExtensionsAreNotUnderCapeOpen) {
+    const char* ids[] = {
+        ::XOPTCO::_tc_IXOptMINLPSystemExtension->id(),
+        ::XOPTCO::_tc_IXOptRealParameterSpec->id(),
+        ::XOPTCO::_tc_IXOptIntegerParameterSpec->id(),
+    };
+    EXPECT_STREQ(ids[0], "IDL:XOPTCO/IXOptMINLPSystemExtension:1.0");
+    EXPECT_STREQ(ids[1], "IDL:XOPTCO/IXOptRealParameterSpec:1.0");
+    EXPECT_STREQ(ids[2], "IDL:XOPTCO/IXOptIntegerParameterSpec:1.0");
+    for (const char* id : ids) {
+        EXPECT_EQ(std::string(id).find("CAPEOPEN"), std::string::npos)
+            << "our extension must not carry a CAPE-OPEN Repository ID: " << id;
+    }
+    // 求解器接口本身仍在官方路径下：扩展继承它，不改它的身份。
+    EXPECT_STREQ(::CAPEOPEN100::Business::Numeric::Minlp::_tc_ICapeMINLPSystem->id(),
+                 "IDL:CAPEOPEN100/Business/Numeric/Minlp/ICapeMINLPSystem:1.0");
+    EXPECT_STREQ(::CAPEOPEN100::Business::Numeric::Minlp::_tc_ICapeMINLPSolverManager->id(),
+                 "IDL:CAPEOPEN100/Business/Numeric/Minlp/ICapeMINLPSolverManager:1.0");
+}
+
 }  // namespace
 
 #ifndef USE_GTEST_MAIN

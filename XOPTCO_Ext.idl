@@ -155,6 +155,162 @@ module XOPTCO {
         raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
   };
 
+  // ==========================================================================
+  //  SOLVER SIDE
+  //
+  //  CAPE-OPEN's solver contract is ICapeMINLPSolverManager::CreateMINLPSystem
+  //  (hand it an ICapeMINLP, get an ICapeMINLPSystem back) plus
+  //  ICapeMINLPSystem::Solve / GetParameters. That is the whole of it. xOpt's
+  //  xOptSolver contract (include/xOpt/xOptSolver.h) needs more than the
+  //  standard carries between two peers:
+  //
+  //   1. The solve outcome as a code (optimal / feasible / infeasible / iteration
+  //      limit ...). Solve() is void; the standard only distinguishes "returned"
+  //      from "raised ECapeSolvingError".
+  //   2. The solution as the SOLVER reports it (X, F = objective + constraint
+  //      values, and the multipliers). The standard expects the PME to read
+  //      variable values back off its own ICapeMINLP after Solve, which is fine
+  //      for X but says nothing about F or the multipliers.
+  //   3. xOpt's option channels: named int / double / string options set and
+  //      read one by one, and the "tunable parameter" list. GetParameters covers
+  //      the numeric tunables as ICapeParameter objects (and we DO publish them
+  //      that way, see IXOptRealParameterSpec below), but a string option and the
+  //      tunable-list handshake have no standard counterpart.
+  //   4. Pause / continue, which xOpt's solver contract carries and CAPE-OPEN
+  //      does not.
+  //   5. Releasing the system. The standard has no destructor; a server that
+  //      creates one ICapeMINLPSystem per client connection would otherwise
+  //      keep every solver ever created alive until it exits.
+  //
+  //  Same policy as IXOptUnitExtension: inherit the standard interface so one
+  //  servant carries one skeleton, and a CAPE-OPEN client that narrows to
+  //  ICapeMINLPSystem still gets Solve and GetParameters.
+  // ==========================================================================
+
+  // Parameter specifications answering BOTH ICapeParameterSpec (Type,
+  // Dimensionality, identification) and the typed spec.
+  //
+  // In the COM binding one object exposes both through QueryInterface. The
+  // CORBA reconstruction keeps ICapeRealParameterSpec / ICapeIntegerParameterSpec
+  // as standalone interfaces with no inheritance, so a servant implementing
+  // both would need two unrelated POA skeletons -- and _is_a of one skeleton
+  // does not answer for the other. IDL multiple inheritance gives one skeleton
+  // whose _is_a answers all three Repository IDs; a CAPE-OPEN client narrowing
+  // to either standard interface still succeeds. These carry XOPTCO Repository
+  // IDs of their own, which is honest: the combination is ours.
+  interface IXOptRealParameterSpec
+      : ::CAPEOPEN100::Common::Parameter::ICapeParameterSpec,
+        ::CAPEOPEN100::Common::Parameter::ICapeRealParameterSpec {
+  };
+
+  interface IXOptIntegerParameterSpec
+      : ::CAPEOPEN100::Common::Parameter::ICapeParameterSpec,
+        ::CAPEOPEN100::Common::Parameter::ICapeIntegerParameterSpec {
+  };
+
+  interface IXOptMINLPSystemExtension
+      : ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLPSystem {
+
+    // --- xOptSolver option channels ----------------------------------------
+    //
+    // The xOpt contract is name-addressed: the caller supplies names and gets
+    // values back; there is no "list every option" operation except the
+    // tunable-parameter list. The Get* operations here therefore take the
+    // names as input, mirroring the contract one to one. types[i] is
+    // xOptSolver::OPTION_TYPE: 0 real, 1 int, 2 string.
+    void GetTunableParameters(
+        out ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        out ::CAPEOPEN100::Common::Types::CapeArrayLong types)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    void SetTunableParameters(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    void GetIntOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        out ::CAPEOPEN100::Common::Types::CapeArrayLong values)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    // accepted[i] is what the solver said about names[i]; a name the solver
+    // does not know is not an error here, it is a false -- exactly as the
+    // xOptSolver contract has it.
+    void SetIntOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        in ::CAPEOPEN100::Common::Types::CapeArrayLong values,
+        out ::CAPEOPEN100::Common::Types::CapeArrayBoolean accepted)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    void GetDoubleOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        out ::CAPEOPEN100::Common::Types::CapeArrayDouble values)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    void SetDoubleOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        in ::CAPEOPEN100::Common::Types::CapeArrayDouble values,
+        out ::CAPEOPEN100::Common::Types::CapeArrayBoolean accepted)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    void GetStringOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        out ::CAPEOPEN100::Common::Types::CapeArrayString values)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    void SetStringOptions(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        in ::CAPEOPEN100::Common::Types::CapeArrayString values,
+        out ::CAPEOPEN100::Common::Types::CapeArrayBoolean accepted)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    // --- outcome -------------------------------------------------------------
+    //
+    // xOptSolver::SOLVE_RESULT of the last Solve (RESULT_UNKNOWN = -1 before
+    // any Solve). Solve itself raises ECapeSolvingError when the code is
+    // negative, so a CAPE-OPEN client sees a failed solve as a failure; an
+    // xOpt client catches that and reads the exact code here.
+    ::CAPEOPEN100::Common::Types::CapeLong GetSolveResult()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    // X and F straight from the solver (F has m+1 entries: objective first,
+    // then the constraint values -- the xOpt convention). Raise ECapeUnknown
+    // when no Solve has run or the solver has nothing to report.
+    ::CAPEOPEN100::Common::Types::CapeArrayDouble GetX()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+    ::CAPEOPEN100::Common::Types::CapeArrayDouble GetF()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+    // Multipliers on the variable bounds / on the constraints. A solver
+    // without dual information raises ECapeUnknown (xOptSolver's Xmul/Fmul
+    // return a negative value there).
+    ::CAPEOPEN100::Common::Types::CapeArrayDouble GetXmul()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+    ::CAPEOPEN100::Common::Types::CapeArrayDouble GetFmul()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    // --- control -------------------------------------------------------------
+    //
+    // Return the solver's own return code (negative = not supported / failed),
+    // the way xOptSolver::pauseSolve / continueSolve do.
+    ::CAPEOPEN100::Common::Types::CapeLong PauseSolve()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+    ::CAPEOPEN100::Common::Types::CapeLong ContinueSolve()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    // Tear the system down on the server: destroy the solver, drop the
+    // reference to the client's problem, deactivate this object. The client
+    // calls it from its destroySolver. Calling it twice is harmless; every
+    // other operation after it raises ECapeUnknown.
+    void Release()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+  };
+
 }; // END XOPTCO
 
 #endif // XOPTCO_Ext_idl

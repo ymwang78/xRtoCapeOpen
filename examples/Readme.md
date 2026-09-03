@@ -312,12 +312,15 @@ fixable 变量与端口映射来自 JSON 而非 DLL 函数。**demo 走 DLL 函�
 `T->in_T P->in_P fi_C1->in_fi_C1 fi_C2->in_fi_C2`，两个出口同款。
 细节见 `docs/xOptMINLPco_design.md` §6.10。
 
-**求解器还不行**。CAPE-OPEN 的求解器侧是 `ICapeMINLPSolverManager` +
-`ICapeMINLPSystem`，仓库里这两个接口只有 IDL 声明、COM IID 常量与 RID 断言，
-**服务端零实现、客户端零调用**。把 `PenaltyGradientSolver` 变成 CO 求解器还需要：
-两个接口的服务端、`Solve()` 后经 `SetMINLPVariableValues` 写回解，
-以及 `ICapeMINLPSystem::GetParameters` 要返回的参数集合——
-而 `CAPEOPEN100_Minlp.idl` 里目前没有 `ICapeCollection`/`ICapeParameter` 模块。
+**求解器也通了**（2026-09）。本目录的**求解器**原样编成 `test_penalty_solver.dll`，
+由 `xOptMINLPcoSolverServer.exe --solver-dll test_penalty_solver.dll` 发布成 CAPE-OPEN
+`ICapeMINLPSolverManager`（官方模块路径，`CAPEOPEN100_Minlp.idl`）；xRto 侧用桥接
+DLL `xRtoCapeOpenSolver.dll`（`Solver.json` 里按 `SolverPath` 注册，连接目标写在旁边的
+`xRtoCapeOpenSolver.target`）把流程图的组合问题发布成 `ICapeMINLP` 交给远端求解。
+`Solve()` 后解经 `SetMINLPVariableValues` 写回，`GetParameters` 把四个可调参数按
+`ICapeParameter` 集合发布。求解期间求解器的每一次 `setX/evaluate*` 都是一次回到
+xRto 的 IIOP 往返——本求解器求值次数多，跨进程会明显变慢，这是通路的本性而不是
+bug。细节见 `docs/xOptMINLPco_design.md` §6.11。
 
 ## 7. 给架构师的 CORBA 提示
 

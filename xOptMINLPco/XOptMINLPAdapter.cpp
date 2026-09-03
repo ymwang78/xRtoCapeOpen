@@ -179,7 +179,8 @@ class CapiProblemView : public IXOptProblemView {
 XOptMINLPAdapter::XOptMINLPAdapter(const std::string& dll_path) : dll_path_(dll_path) {}
 XOptMINLPAdapter::XOptMINLPAdapter(const std::string& dll_path, const std::string& desc_path)
     : dll_path_(dll_path), desc_path_(desc_path) {}
-XOptMINLPAdapter::XOptMINLPAdapter(xOptProblem* injected) : inject_cpp_(injected) {}
+XOptMINLPAdapter::XOptMINLPAdapter(xOptProblem* injected, bool initialize_problem)
+    : inject_cpp_(injected), initialize_injected_(initialize_problem) {}
 XOptMINLPAdapter::XOptMINLPAdapter(const xOptProblemT& injected)
     : have_capi_inject_(true), inject_capi_(injected) {}
 
@@ -594,7 +595,9 @@ int XOptMINLPAdapter::connect() {
     }
 
     // 2) initialize + 缓存规模/名称/界/结构（经 view_，ABI 无关）
-    if (view_->initialize() < 0) return fail("connect: initialize failed");
+    // 注入的、且宿主声明已初始化过的问题不再 initialize（见头文件注入构造的说明）。
+    const bool skip_init = (inject_cpp_ != nullptr && !initialize_injected_);
+    if (!skip_init && view_->initialize() < 0) return fail("connect: initialize failed");
 
     size_ = CapeMINLPSize{};
     const int nv = view_->numVariables();
