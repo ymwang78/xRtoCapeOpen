@@ -73,6 +73,8 @@ class XOptSolverLibrary {
     const std::string& lastError() const { return last_error_; }
 
   private:
+    void unloadModule();
+
     std::string dll_path_;
     void* module_ = nullptr;
     CreateSolverFunc create_ = nullptr;

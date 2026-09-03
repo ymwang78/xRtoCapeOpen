@@ -53,6 +53,11 @@ void testLog(ZLOG_LEVEL level, const char* format, ...) {
     std::printf("  [solver log %d] %s\n", static_cast<int>(level), buf);
 }
 
+std::string exeDirOf(const std::string& path) {
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+}
+
 ct::CapeArrayString names1(const char* a) {
     ct::CapeArrayString s;
     s.length(1);
@@ -267,6 +272,33 @@ TEST_F(SolverLoopbackTest, GetParameters_PublishesTunablesAsCapeParameters) {
 
         // 输出模式对求解器选项没有意义
         EXPECT_THROW(param->SetMode(cp::CAPE_OUTPUT), ce::ECapeInvalidArgument);
+
+        // 非有限值不进求解器
+        CORBA::Any bad;
+        bad <<= static_cast<CORBA::Double>(std::nan(""));
+        EXPECT_THROW(param->SetValue(bad), ce::ECapeInvalidArgument);
+    }
+    // 整数参数只收整数：1.5 不截断、NaN / 超范围不转 int（那是未定义行为）
+    {
+        CORBA::Any id;
+        id <<= "max_iter";
+        CORBA::Object_var item = coll->Item(id);
+        cp::ICapeParameter_var param = cp::ICapeParameter::_narrow(item.in());
+        ASSERT_FALSE(CORBA::is_nil(param.in()));
+        const double bad_values[] = {1.5, std::nan(""), 1e12, -1e12};
+        for (double b : bad_values) {
+            CORBA::Any v;
+            v <<= static_cast<CORBA::Double>(b);
+            EXPECT_THROW(param->SetValue(v), ce::ECapeInvalidArgument) << "value " << b;
+        }
+        ct::CapeArrayLong_var back;
+        ext->GetIntOptions(names1("max_iter"), back.out());
+        EXPECT_EQ(back[0u], 2000) << "a rejected value must not have reached the solver";
+        CORBA::Any ok;
+        ok <<= static_cast<CORBA::Double>(300.0);  // 整值的 double 可以
+        param->SetValue(ok);
+        ext->GetIntOptions(names1("max_iter"), back.out());
+        EXPECT_EQ(back[0u], 300);
     }
     // 没有的名字与越界下标都是 ECapeInvalidArgument，不是空引用
     {
@@ -279,6 +311,21 @@ TEST_F(SolverLoopbackTest, GetParameters_PublishesTunablesAsCapeParameters) {
     }
 
     ext->Release();
+}
+
+// 缺导出的 DLL：load 失败要说清楚，再 load 一次也只是再失败一次，不叠句柄。
+TEST(XOptSolverLibraryTest, MissingExports_LoadFailsAndCanBeRetried) {
+    // mock_xoptproblem.dll 导出的是 createProblem，不是 createSolver
+    XOptSolverLibrary lib(exeDirOf(TEST_PENALTY_SOLVER_DLL) + "/../mock_xoptproblem.dll");
+    EXPECT_LT(lib.load(), 0);
+    EXPECT_NE(lib.lastError().find("createSolver"), std::string::npos) << lib.lastError();
+    EXPECT_FALSE(lib.loaded());
+    EXPECT_LT(lib.load(), 0);
+    EXPECT_EQ(lib.create("x", nullptr, nullptr), nullptr);
+
+    XOptSolverLibrary missing("no_such_dir/no_such_solver.dll");
+    EXPECT_LT(missing.load(), 0);
+    EXPECT_FALSE(missing.lastError().empty());
 }
 
 TEST_F(SolverLoopbackTest, CreateSystem_RejectsAReferenceThatIsNotAProblem) {

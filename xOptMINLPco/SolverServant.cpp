@@ -14,6 +14,7 @@
 
 #include <cfloat>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -259,9 +260,22 @@ class SolverParameterServant : public POA_CAPEOPEN100::Common::Parameter::ICapeP
         xOptSolver::boolean accepted[1] = {0};
         int rc;
         if (type_ == xOptSolver::OPTION_INT) {
+            // 整数参数只收整数：NaN / 超出 int 范围的 double 转 int 是未定义行为，
+            // 1.5 之类静默截成 1 也不是调用方的意思。规范给的是 ECapeInvalidArgument。
+            if (!std::isfinite(numeric) || numeric < static_cast<double>(INT32_MIN) ||
+                numeric > static_cast<double>(INT32_MAX) || std::floor(numeric) != numeric) {
+                throw invalidArgument("ICapeParameter", op,
+                                      "'" + name_ + "' is an integer option; the value must be "
+                                      "a finite integral number within the 32-bit range",
+                                      1);
+            }
             const int v[1] = {static_cast<int>(numeric)};
             rc = solver_->setIntOptions(accepted, names, v, 1);
         } else {
+            if (!std::isfinite(numeric)) {
+                throw invalidArgument("ICapeParameter", op,
+                                      "'" + name_ + "' must be a finite number", 1);
+            }
             const double v[1] = {numeric};
             rc = solver_->setDoubleOptions(accepted, names, v, 1);
         }
@@ -345,13 +359,7 @@ void deactivate(PortableServer::POA_ptr poa, CORBA::Object_ptr ref) {
 
 XOptSolverLibrary::XOptSolverLibrary(std::string dll_path) : dll_path_(std::move(dll_path)) {}
 
-XOptSolverLibrary::~XOptSolverLibrary() {
-#ifdef _WIN32
-    if (module_ != nullptr) FreeLibrary(reinterpret_cast<HMODULE>(module_));
-#else
-    if (module_ != nullptr) dlclose(module_);
-#endif
-}
+XOptSolverLibrary::~XOptSolverLibrary() { unloadModule(); }
 
 int XOptSolverLibrary::load() {
     if (loaded()) return 0;
@@ -381,12 +389,25 @@ int XOptSolverLibrary::load() {
 #endif
     if (create_ == nullptr || destroy_ == nullptr) {
         // 两个都要：只有 createSolver 的 DLL 宿主也不接受（xOpt.cpp::loadSolver）。
+        // 模块此刻就放掉：留着的话下一次 load() 会直接覆盖 module_，前一个句柄
+        // 就漏了（Windows 上还多一个引用计数）。
         last_error_ = "'" + dll_path_ + "' does not export both createSolver and destroySolver";
         create_ = nullptr;
         destroy_ = nullptr;
+        unloadModule();
         return -1;
     }
     return 0;
+}
+
+void XOptSolverLibrary::unloadModule() {
+    if (module_ == nullptr) return;
+#ifdef _WIN32
+    FreeLibrary(reinterpret_cast<HMODULE>(module_));
+#else
+    dlclose(module_);
+#endif
+    module_ = nullptr;
 }
 
 xOptSolver* XOptSolverLibrary::create(const char* name, xOptProblem* problem, xOptLogFunc log) {
@@ -584,9 +605,15 @@ void MINLPSystemServant::Solve() {
     // 把解写回远端问题。ICapeMINLP 的消费者靠 GetMINLPVariableValues 取解，
     // 而 xOptSolver 契约只保证 X() 能读出来，并不要求求解器最后一次 setX 停在
     // 解上——不能指望它。这里是 xRto 那头 X() 之外的第二条取解路径。
+    // 写回失败不能静默：回调连接断了、或客户端拒收，标准客户端读到的就是旧值，
+    // 而 Solve 还说成功。结果码与 GetX 照常可用（xOpt 客户端不靠写回取解），
+    // 但 Solve 本身按失败报。
+    bool write_back_ok = true;
     if (num_variables_ > 0) {
         std::vector<double> x(static_cast<size_t>(num_variables_), 0.0);
-        if (solver_->X(x.data(), num_variables_) >= 0) problem_->setX(x.data(), num_variables_);
+        if (solver_->X(x.data(), num_variables_) >= 0) {
+            write_back_ok = problem_->setX(x.data(), num_variables_) >= 0;
+        }
     }
 
     // 负码即失败（RESULT_USER_PAUSE 例外：那是"停下了"，不是"坏了"）。抛规范
@@ -596,6 +623,12 @@ void MINLPSystemServant::Solve() {
                            resultName(r) + ")";
         if (!why.empty()) desc += ": " + why;
         throw solvingError("Solve", desc);
+    }
+    if (!write_back_ok) {
+        throw solvingError("Solve", "solver '" + name_ + "' finished with " + resultName(r) +
+                                        ", but writing the solution back to the problem "
+                                        "(SetMINLPVariableValues) failed; the problem's variable "
+                                        "values are stale -- read X through the extension");
     }
 }
 
