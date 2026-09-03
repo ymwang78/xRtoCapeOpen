@@ -50,7 +50,10 @@ class XOptMINLPAdapter : public ICapeMINLPModel {
     explicit XOptMINLPAdapter(const std::string& dll_path);  // 自动探测 ABI
     // desc_path 为空时在 DLL 同目录自动发现唯一的 *_Model.json（C ABI 才用得上）
     XOptMINLPAdapter(const std::string& dll_path, const std::string& desc_path);
-    explicit XOptMINLPAdapter(xOptProblem* injected);        // 注入 C++ 问题（不拥有）
+    // 注入 C++ 问题（不拥有）。initialize_problem=false 时 connect() 不再调它的
+    // initialize()：宿主交来的问题（xRto 的组合问题）早已初始化过，再调一次会把
+    // 它整个重建——求解器桥接 DLL 走的就是这条。
+    explicit XOptMINLPAdapter(xOptProblem* injected, bool initialize_problem = true);
     explicit XOptMINLPAdapter(const xOptProblemT& injected); // 注入 C vtable（不拥有）
     ~XOptMINLPAdapter() override;
 
@@ -117,6 +120,7 @@ class XOptMINLPAdapter : public ICapeMINLPModel {
     std::string desc_source_;  // 实际用上的那一份（报错信息要指得出是谁）
     XOptModelDesc desc_;
     xOptProblem* inject_cpp_ = nullptr;
+    bool initialize_injected_ = true;  // 见注入构造的说明
     bool have_capi_inject_ = false;
     xOptProblemT inject_capi_{};
 

@@ -73,17 +73,46 @@ endif()
 if(WITH_XOPTMINLPCO_CORBA)
     # UnitServant 与 MINLPServant 同库：两者共用同一个 XOptMINLPAdapter，
     # 也共用同一批 IDL stub，拆开只会多一条链接顺序约束。
-    add_library(xoptminlpco_corba STATIC MINLPServant.cpp UnitServant.cpp)
+    # SolverServant（求解器侧：ICapeMINLPSolverManager / ICapeMINLPSystem）与
+    # XOptProblemFromVtable（远端问题 -> xOptProblem）也在这里：求解器服务端要把
+    # 远端问题喂给本地求解器 DLL，走的是 capeopen_corba 的消费端后端，依赖方向
+    # 与 MINLPServant 相反，但用的是同一批 stub。
+    # CorbaPublish 是两个 server exe 共用的发布工具（IOR 落盘 / Naming / 停机）。
+    add_library(xoptminlpco_corba STATIC
+        MINLPServant.cpp
+        UnitServant.cpp
+        SolverServant.cpp
+        XOptProblemFromVtable.cpp
+        CorbaPublish.cpp
+    )
     # capeopen_corba PUBLIC 传递 TAO include/defines/libs + capeopen100_minlp
-    # 由 tao_idl 从 CAPEOPEN100_Minlp.idl 生成的 stub 头
-    target_link_libraries(xoptminlpco_corba PUBLIC xoptminlpco capeopen_corba)
+    # 由 tao_idl 从 CAPEOPEN100_Minlp.idl 生成的 stub 头。
+    # Naming Service（issue #6）需要 orbsvcs 的 CosNaming stub；头文件在
+    # <triplet>/include/orbsvcs/，故 include 根仍是 TAO_INCLUDE_DIR。
+    target_link_libraries(xoptminlpco_corba PUBLIC xoptminlpco capeopen_corba TAO_CosNamings)
 
     # 独立进程 CORBA server：CORBA 没有 COM 那样的进程内激活，外部 ORB 只能
     # 经 IIOP 连到一个真在跑 ORB 的进程，所以这里必须是 exe 而不是 DLL。
     add_executable(xOptMINLPcoCorbaServer MINLPCorbaServer.cpp)
-    # --name 走 Naming Service（issue #6）：需要 orbsvcs 的 CosNaming stub。
-    # 头文件在 <triplet>/include/orbsvcs/，故 include 根仍是 TAO_INCLUDE_DIR。
-    target_link_libraries(xOptMINLPcoCorbaServer PRIVATE xoptminlpco_corba TAO_CosNamings)
+    target_link_libraries(xOptMINLPcoCorbaServer PRIVATE xoptminlpco_corba)
+
+    # 求解器侧的独立进程 server：发布 ICapeMINLPSolverManager，把一个 xOptSolver
+    # DLL（createSolver/destroySolver）交给远端的问题去用。与上面那个互为镜像。
+    add_executable(xOptMINLPcoSolverServer MINLPSolverCorbaServer.cpp)
+    target_link_libraries(xOptMINLPcoSolverServer PRIVATE xoptminlpco_corba)
+
+    # xRto 侧的求解器桥接 DLL：对宿主是一个普通求解器 DLL（导出
+    # createSolver/destroySolver，在 Solver.json 里按 SolverPath 注册），对远端是
+    # CAPE-OPEN 客户端——把宿主交来的 xOptProblem 发布成 ICapeMINLP，交给
+    # 远端的 ICapeMINLPSolverManager。产物 xRtoCapeOpenSolver.dll。
+    #
+    # target 名与 OUTPUT_NAME 分开、导入库改名：同 xoptminlpco_dll 那条注记，
+    # 避免 VS 生成器与静态库在大小写不敏感的文件系统上撞车。
+    add_library(xrtocapeopensolver_dll SHARED CapeOpenSolverBridge.cpp)
+    target_link_libraries(xrtocapeopensolver_dll PRIVATE xoptminlpco_corba)
+    set_target_properties(xrtocapeopensolver_dll PROPERTIES
+        OUTPUT_NAME "xRtoCapeOpenSolver" PREFIX ""
+        ARCHIVE_OUTPUT_NAME "xRtoCapeOpenSolver_import")
 endif()
 
 # ---- 单元测试 ----
@@ -232,5 +261,80 @@ if(XOPTMINLPCO_BUILD_TESTS)
             XRTO_TAO_TOOLS_DIR="${TAO_TRIPLET_DIR}/tools/ace")
         add_dependencies(test_xoptminlpco_corba_naming xOptMINLPcoCorbaServer mock_xoptproblem)
         add_test(NAME XOptMINLPcoCorbaNamingTest COMMAND test_xoptminlpco_corba_naming)
+
+        # ---- 求解器通路 ----
+        # 测试夹具：examples 里的示例求解器（罚函数梯度下降）原样编成 DLL。它就是
+        # 部署时被 xOptMINLPcoSolverServer 包装的那个东西，不另造 mock——求解器
+        # 通路要证的正是"一个真实的 xOptSolver DLL 能被远端问题驱动"。
+        # Eigen 与 xOpt 头都在仓库根 include 下（examples/CMakeLists.txt 同款）。
+        # 输出目录独占并逐配置钉死，理由同 mock_xoptmodel。
+        set(TEST_PENALTY_SOLVER_DIR "${CMAKE_CURRENT_BINARY_DIR}/testsolver")
+        add_library(test_penalty_solver SHARED
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/testSolver/PenaltyGradientSolver.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/testSolver/SolverEntry.cpp
+        )
+        target_include_directories(test_penalty_solver PRIVATE ${XOPT_INCLUDE_DIR})
+        set_target_properties(test_penalty_solver PROPERTIES PREFIX "" OUTPUT_NAME "test_penalty_solver")
+        foreach(cfg IN ITEMS "" DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            if(cfg STREQUAL "")
+                set(prop_suffix "")
+            else()
+                set(prop_suffix "_${cfg}")
+            endif()
+            set_target_properties(test_penalty_solver PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}"
+                LIBRARY_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}")
+        endforeach()
+        file(TO_CMAKE_PATH "${TEST_PENALTY_SOLVER_DIR}" TEST_PENALTY_SOLVER_DIR_FWD)
+
+        # 第二个夹具：支持暂停/继续的剧本式求解器，钉住"继续之后结果要刷新"。
+        # 与上面同一个钉死的输出目录。
+        add_library(mock_xoptsolver SHARED ${CMAKE_CURRENT_SOURCE_DIR}/../tests/mock_xoptsolver_dll.cpp)
+        target_include_directories(mock_xoptsolver PRIVATE ${XOPT_INCLUDE_DIR})
+        set_target_properties(mock_xoptsolver PROPERTIES PREFIX "" OUTPUT_NAME "mock_xoptsolver")
+        foreach(cfg IN ITEMS "" DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+            if(cfg STREQUAL "")
+                set(prop_suffix "")
+            else()
+                set(prop_suffix "_${cfg}")
+            endif()
+            set_target_properties(mock_xoptsolver PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}"
+                LIBRARY_OUTPUT_DIRECTORY${prop_suffix} "${TEST_PENALTY_SOLVER_DIR}")
+        endforeach()
+
+        set(TEST_PENALTY_SOLVER_DLL_DEF
+            TEST_PENALTY_SOLVER_DLL="${TEST_PENALTY_SOLVER_DIR_FWD}/test_penalty_solver${CMAKE_SHARED_LIBRARY_SUFFIX}"
+            MOCK_XOPTSOLVER_DLL="${TEST_PENALTY_SOLVER_DIR_FWD}/mock_xoptsolver${CMAKE_SHARED_LIBRARY_SUFFIX}")
+
+        # 回环（collocated）：mock 问题 -> MINLPServant；SolverManagerServant 加载
+        # 真实求解器 DLL -> CreateMINLPSystem -> Solve -> 解析最优；参数集合；Release。
+        add_executable(test_xoptminlpco_solver
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_solver.cpp
+        )
+        target_link_libraries(test_xoptminlpco_solver PRIVATE xoptminlpco_corba GTest::gtest)
+        target_include_directories(test_xoptminlpco_solver PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+        target_compile_definitions(test_xoptminlpco_solver PRIVATE ${TEST_PENALTY_SOLVER_DLL_DEF})
+        # mock_xoptproblem.dll 也是它的夹具（一个缺 createSolver 导出的 DLL）；
+        # 测试按自己 exe 的目录找它——两者都在默认运行输出目录里，Ninja 与
+        # VS 多配置下都成立，与两条 IPC 测试同一约定。
+        add_dependencies(test_xoptminlpco_solver test_penalty_solver mock_xoptsolver mock_xoptproblem)
+        add_test(NAME XOptMINLPcoSolverTest COMMAND test_xoptminlpco_solver)
+
+        # 真·跨进程，按 xRto 的用法：起 xOptMINLPcoSolverServer.exe，本进程
+        # LoadLibrary 桥接 DLL、createSolver、solve。它证的是嵌套上行调用——
+        # 阻塞在远端 Solve 里的线程能受理服务端回调过来的 ICapeMINLP 请求。
+        # 本测试不链接任何 TAO：它就是宿主。
+        add_executable(test_xoptminlpco_solver_ipc
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/test_xoptminlpco_solver_ipc.cpp
+        )
+        target_link_libraries(test_xoptminlpco_solver_ipc PRIVATE GTest::gtest)
+        target_include_directories(test_xoptminlpco_solver_ipc PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests ${XOPT_INCLUDE_DIR})
+        target_compile_definitions(test_xoptminlpco_solver_ipc PRIVATE ${TEST_PENALTY_SOLVER_DLL_DEF})
+        add_dependencies(test_xoptminlpco_solver_ipc
+            xOptMINLPcoSolverServer xrtocapeopensolver_dll test_penalty_solver mock_xoptsolver)
+        add_test(NAME XOptMINLPcoSolverIpcTest COMMAND test_xoptminlpco_solver_ipc)
     endif()
 endif()

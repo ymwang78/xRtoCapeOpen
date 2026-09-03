@@ -688,6 +688,87 @@ Connect 一个 Material Object，再经 Thermo 接口读）、枚举一个端口
 **状态仍是 self-interop**。至今所有验证的两端都是从同一份重建 IDL 编出来的，
 证明的是重建自洽 + 说标准 GIOP，**不是**与官方 IDL 一致。别对第三方宣称合规。
 
+### 6.11 求解器通路：把 xOptSolver DLL 发布成 CAPE-OPEN 求解器，让 xRto 远程求解（2026-09）
+
+**问题**。§6.10 之后模型能远程接进流程图，但求解器仍是 xRto 进程内的 DLL。
+CAPE-OPEN 的求解器侧是 `ICapeMINLPSolverManager::CreateMINLPSystem(theMINLP)`
++ `ICapeMINLPSystem::{Solve, GetParameters}`（`CAPEOPEN100_Minlp.idl`，官方模块
+路径；`SqpSolver.idl` 是留作对照的旧文件，不参与），仓库里只有 IDL 与 RID 断言，
+服务端零实现、客户端零调用。目标是把 `examples/testSolver` 那个罚函数梯度下降
+求解器原样发布出去，并让 xRto 像用 RSQP 一样用它。
+
+**方向与模型通路相反**。模型通路里问题在服务端、消费端拉；求解器通路里
+**问题在 xRto 进程里**，服务端得回过头来调它——`CreateMINLPSystem` 的入参就是
+客户端自己的 `ICapeMINLP` 引用。于是：
+
+- **xRto 进程变成 CORBA 服务端**。桥接 DLL `xRtoCapeOpenSolver.dll`
+  （`xOptMINLPco/CapeOpenSolverBridge.cpp`）对宿主是普通求解器 DLL（导出
+  `createSolver`/`destroySolver`，`Solver.json` 按 `SolverPath` 注册），内部跑一个
+  ORB + RootPOA，把宿主交来的 `xOptProblem` 经 `XOptMINLPAdapter`（注入构造）+
+  `MINLPServant` 发布成 `ICapeMINLP`，再连远端管理器 `CreateMINLPSystem`。
+  注入构造多了一个 `initialize_problem=false` 开关：宿主交来的组合问题早已
+  初始化过，再调一次 `initialize()` 会把它整个重建。
+- **没有单独的 ORB 线程**。xRto 的线程阻塞在远端 `Solve()` 里等应答时，TAO 的
+  leader-follower 等待策略让这个线程顺手跑事件循环、派发远端回调过来的
+  `ICapeMINLP` 请求（嵌套上行调用）。于是问题对象只被一个线程碰，不需要锁，
+  `xOptProblemComp` 也不必线程安全。桥接 DLL 经 `-ORBSvcConfDirective` 显式指定
+  `Client_Strategy_Factory "-ORBClientConnectionHandler MT"`——它是默认值，但这条
+  通路**依赖**它。（`-ORBClientConnectionHandler` 不是 `ORB_init` 认的选项，直接给
+  会 BAD_PARAM，实测踩过。）ORB 故意泄漏、与进程同寿：DLL 卸载时的静态析构顺序
+  与 ACE/TAO 自己的静态对象纠缠，那时 destroy 一个 ORB 是崩溃的常见来源。
+- **服务端** `xOptMINLPcoSolverServer.exe`（`MINLPSolverCorbaServer.cpp` +
+  `SolverServant.{h,cpp}`）：`--solver-dll` 加载求解器 DLL，发布
+  `SolverManagerServant`。每来一个 `CreateMINLPSystem` 就建一个 `MINLPSystemServant`：
+  远端 `ICapeMINLP` -> `CapeMINLPModelCorba`（注入引用）-> `CapeMINLPProblemCore`
+  -> `xOptProblemT` -> `XOptProblemFromVtable`（新，C 函数表 -> `xOptProblem`，
+  `examples/demo/ProblemFromModelT` 的同款）-> `createSolver(...)`。求解器的每一次
+  `setX/evaluate*` 都是一次回到客户端的 IIOP 往返——问题在谁手里，谁就得被回调。
+- **`Solve()` 之后把解写回远端问题**（`SetMINLPVariableValues`）。`xOptSolver`
+  契约只保证 `X()` 能读出来，不要求求解器最后一次 `setX` 停在解上；而 CAPE-OPEN
+  消费者取解的标准路径就是 `GetMINLPVariableValues`。负结果码抛规范专设的
+  `ECapeSolvingError`（`RESULT_USER_PAUSE` 例外），第三方 CO 客户端按它区分
+  "求解器说不行"与"调用坏了"。
+- **`GetParameters` 是标准的那一半**。可调参数（`getTunableParamList`）按
+  `ICapeCollection` of `ICapeParameter` 发布，值直接读写求解器的 options 通道
+  （不缓存，否则经扩展改过之后这里答的是旧的）。类型化 spec 用 IDL 多继承合成
+  `XOPTCO::IXOptRealParameterSpec : ICapeParameterSpec, ICapeRealParameterSpec`
+  （整数同款）：重建 IDL 里这两个标准接口互不继承，一个 servant 实现两份不相关
+  的骨架会有 `_is_a` 歧义；合成之后一个骨架应答三个 RID，第三方 `_narrow` 到任一
+  标准接口照样成立。字符串型可调参数没有发（规范对应 `ICapeOptionParameterSpec`，
+  本次未承载）。
+- **`XOPTCO::IXOptMINLPSystemExtension : ICapeMINLPSystem`**（我们的，不是
+  CAPE-OPEN）补标准表达不了的五件事：结果码 `GetSolveResult`、求解器自报的
+  `GetX/GetF/GetXmul/GetFmul`（F 按 xOpt 约定 m+1 个）、按名字的
+  int/double/string 选项通道与 tunable 列表握手、`PauseSolve/ContinueSolve`、
+  以及 `Release()`——标准没有析构，不加它服务端会把每个连过的求解器养到退出。
+  `Get*Options` 以名字为入参：`xOptSolver` 契约本就是按名字取值，没有"枚举所有
+  选项"的操作，桥接 DLL 对"只报个数"的两段式查询答 -1。
+- **连接目标**：`createSolver` 的 name 自带 scheme（xRto 传的是 "FLOWSHEET"，走不到）
+  -> DLL 同目录 `xRtoCapeOpenSolver.target` -> 环境变量 `XRTO_CAPEOPEN_SOLVER_TARGET`
+  -> 失败并打出该建哪个文件。与模型通路同一套道理与顺序。
+- 两个 server exe 共用的发布工具（IOR 原子落盘、Naming 绑定/解绑、停机信号）
+  抽进 `CorbaPublish.{h,cpp}`——两者的发布语义必须一致，而一致最可靠的保证是
+  同一份代码；`MINLPCorbaServer.cpp` 行为不变。
+
+**验证**。`tests/test_xoptminlpco_solver.cpp`（collocated：真实
+`test_penalty_solver.dll` + mock 问题，解到 (1.5, 1.5)，参数集合按下标/名字取、
+`SetValue` 直达求解器、`Release` 之后 OBJECT_NOT_EXIST）；
+`tests/test_xoptminlpco_solver_ipc.cpp`（真·跨进程，按 xRto 的用法
+`LoadLibrary` 桥接 DLL + `createSolver("FLOWSHEET", ...)`，证的就是嵌套上行调用）。
+RID 钉在 `test_capeopen100_unit_rid.cpp`。
+
+**代价要明说**：细粒度回调。罚函数梯度下降一轮几千次求值，每次 3 个往返
+（setX / objective / constraints），mock 问题跨进程一次求解按出厂 `max_iter`
+要两三分钟（collocated 1.5 秒）。RSQP 这类一阶/拟牛顿法求值次数少一两个量级，
+但仍是每次求值一次往返。要快只有两条路：`ICapeMINLP` 侧批量化（规范没有），
+或把问题也搬到求解器那一侧——那就回到了模型通路。
+
+**部署**（xRto）：`Release/xRtoCapeOpenSolver.dll` + `Release/xRtoCapeOpenSolver.target`
+（`corba:corbaname::localhost:24567#xopt/solver`），`Solver/Solver.json` 登记
+`Penalty_Corba`；服务端 `UnitModel/Corba/start_solver.bat`
+（`xOptMINLPcoSolverServer --solver-dll test_penalty_solver.dll --name xopt/solver`，
+与模型服务端共用那个 naming）。
+
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。
 - `tests/test_xoptminlpco_adapter.cpp`：`MockXOptProblem` + adapter 对拍（size/names/bounds/结构/求值）。
