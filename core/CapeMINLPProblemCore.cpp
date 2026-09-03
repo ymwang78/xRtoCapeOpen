@@ -440,15 +440,17 @@ int CapeMINLPProblemCore::evaluateObjective(double* obj) const {
 // 三个按结构长度填值的 evaluate*：**"要 0 个"不是错误参数，是没有东西可填**。
 //
 // 宿主（xOptProblemComp）按各子问题的结构长度开一个 std::vector 再把 data()
-// 传进来；结构为空时那个 vector 是空的，data() 就是 nullptr、长度 0。目标恒为
+// 传进来；结构为空时那个 vector 是空的，长度 0，而空 vector 的 data() 标准
+// 不保证非空（MSVC 下就是 nullptr）——长度为 0 时指针本来就不该被看。目标恒为
 // 常数的可行性问题（examples 的 Splitter 就是）目标梯度结构正是空的。先前这里
-// 一律按"空指针"拒绝返回 -1，宿主那头 `ret == size || ret == 0 || ret == 1`
-// 的断言当场失败，RSQP 报 "Fail to get linearized objective"，同一个模型走
-// 本地 DLL 通道能解、走 CORBA 通道解不了——因为本地 DLL 对长度 0 答的是 0。
-// 长度 0 直接答 0，也省掉一次注定空手而归的远程往返。
+// 先查指针再查长度，一律按"空指针"拒绝返回 -1，宿主那头
+// `ret == size || ret == 0 || ret == 1` 的断言当场失败，RSQP 报
+// "Fail to get linearized objective"，同一个模型走本地 DLL 通道能解、走 CORBA
+// 通道解不了——因为本地 DLL 对长度 0 答的是 0。
+// 长度恰为 0 直接答 0，也省掉一次注定空手而归的远程往返；负长度仍是非法参数。
 int CapeMINLPProblemCore::evaluateConstraints(double* cons, int cons_size) const {
-    if (!usable()) return -1;
-    if (cons_size <= 0 || size_.num_constraints == 0) return 0;
+    if (!usable() || cons_size < 0) return -1;
+    if (cons_size == 0 || size_.num_constraints == 0) return 0;
     if (cons == nullptr) return -1;
     std::vector<double> values;
     if (model_->getNonlinearConstraintValues(allConstraintIds(), values) < 0) return -1;
@@ -458,8 +460,8 @@ int CapeMINLPProblemCore::evaluateConstraints(double* cons, int cons_size) const
 }
 
 int CapeMINLPProblemCore::evaluateObjectiveGradient(double* grad, int grad_size) const {
-    if (!usable()) return -1;
-    if (grad_size <= 0 || objgrad_colidx_.empty()) return 0;
+    if (!usable() || grad_size < 0) return -1;
+    if (grad_size == 0 || objgrad_colidx_.empty()) return 0;
     if (grad == nullptr) return -1;
     std::vector<double> values;
     if (model_->getObjectiveDerivativeValues(cape::kDerivNonlinear, values) < 0) return -1;
@@ -469,8 +471,8 @@ int CapeMINLPProblemCore::evaluateObjectiveGradient(double* grad, int grad_size)
 }
 
 int CapeMINLPProblemCore::evaluateConstraintsJacobianValues(double* values, int values_size) const {
-    if (!usable()) return -1;
-    if (values_size <= 0 || jac_rowidx_.empty()) return 0;
+    if (!usable() || values_size < 0) return -1;
+    if (values_size == 0 || jac_rowidx_.empty()) return 0;
     if (values == nullptr) return -1;
     std::vector<double> jac;
     if (model_->getConstraintDerivativeValues(cape::kStructJacobian, allConstraintIds(), jac) < 0) {

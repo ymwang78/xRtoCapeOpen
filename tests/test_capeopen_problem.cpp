@@ -374,9 +374,10 @@ TEST(CapeOpenProblemRefreshTest, MarkStaleBlocksReadsUntilARefreshSucceeds) {
 // ===========================================================================
 
 // 宿主（xOptProblemComp）按子问题的结构长度开 std::vector 再把 data() 传进来；
-// 结构为空时 data() 是 nullptr、长度 0。目标恒为常数的可行性问题（examples 的
-// Splitter）目标梯度结构就是空的——回归：先前这里返回 -1，宿主断言失败，RSQP
-// 报 "Fail to get linearized objective"，同一模型本地 DLL 能解、CORBA 解不了。
+// 结构为空时 vector 是空的、长度 0，而空 vector 的 data() 标准不保证非空（MSVC
+// 下就是 nullptr）。目标恒为常数的可行性问题（examples 的 Splitter）目标梯度结构
+// 就是空的——回归：先前这里先查指针返回 -1，宿主断言失败，RSQP 报
+// "Fail to get linearized objective"，同一模型本地 DLL 能解、CORBA 解不了。
 TEST(CapeOpenProblemEvaluateTest, EmptyObjectiveGradient_ZeroLengthRequest_ReturnsZero) {
     CapeMINLPProblemCore core(std::make_unique<ResizableStub>());
     ASSERT_EQ(core.initialize(), 0);
@@ -385,9 +386,10 @@ TEST(CapeOpenProblemEvaluateTest, EmptyObjectiveGradient_ZeroLengthRequest_Retur
     ASSERT_EQ(core.getObjectiveGradientStructure(nullptr, &gsz), 0);
     ASSERT_EQ(gsz, 0);
 
-    std::vector<double> grad(static_cast<size_t>(gsz));  // 空 vector：data() 为 nullptr
+    // 空 vector：长度 0，data() 可能为 nullptr——宿主传的就是这个
+    std::vector<double> grad(static_cast<size_t>(gsz));
     EXPECT_EQ(core.evaluateObjectiveGradient(grad.data(), static_cast<int>(grad.size())), 0);
-    EXPECT_EQ(core.evaluateObjectiveGradient(nullptr, 0), 0);
+    EXPECT_EQ(core.evaluateObjectiveGradient(nullptr, 0), 0);  // 显式的 nullptr 也一样
 
     // 结构非空但长度 0 的请求同样是"要 0 个"，不是错误
     int nnz = -1;
@@ -398,6 +400,13 @@ TEST(CapeOpenProblemEvaluateTest, EmptyObjectiveGradient_ZeroLengthRequest_Retur
     // 真要填值而缓冲为空，仍然是错误参数
     ASSERT_EQ(core.numConstraints(), 2);
     EXPECT_LT(core.evaluateConstraints(nullptr, 2), 0);
+
+    // 负长度不是"要 0 个"，是非法参数：三个接口一律 -1
+    double buf[2] = {0, 0};
+    EXPECT_LT(core.evaluateConstraints(buf, -1), 0);
+    EXPECT_LT(core.evaluateObjectiveGradient(buf, -1), 0);
+    EXPECT_LT(core.evaluateConstraintsJacobianValues(buf, -1), 0);
+    EXPECT_LT(core.evaluateObjectiveGradient(nullptr, -1), 0);
 }
 
 TEST(CapeOpenProblemEvaluateTest, NoConstraints_ZeroLengthRequest_ReturnsZero) {
