@@ -369,6 +369,65 @@ TEST(CapeOpenProblemRefreshTest, MarkStaleBlocksReadsUntilARefreshSucceeds) {
     EXPECT_STREQ(names[0], "new_x0");
 }
 
+// ===========================================================================
+//  结构为空时的 evaluate*：长度 0 的请求答 0，而不是按空指针拒绝
+// ===========================================================================
+
+// 宿主（xOptProblemComp）按子问题的结构长度开 std::vector 再把 data() 传进来；
+// 结构为空时 data() 是 nullptr、长度 0。目标恒为常数的可行性问题（examples 的
+// Splitter）目标梯度结构就是空的——回归：先前这里返回 -1，宿主断言失败，RSQP
+// 报 "Fail to get linearized objective"，同一模型本地 DLL 能解、CORBA 解不了。
+TEST(CapeOpenProblemEvaluateTest, EmptyObjectiveGradient_ZeroLengthRequest_ReturnsZero) {
+    CapeMINLPProblemCore core(std::make_unique<ResizableStub>());
+    ASSERT_EQ(core.initialize(), 0);
+
+    int gsz = -1;
+    ASSERT_EQ(core.getObjectiveGradientStructure(nullptr, &gsz), 0);
+    ASSERT_EQ(gsz, 0);
+
+    std::vector<double> grad(static_cast<size_t>(gsz));  // 空 vector：data() 为 nullptr
+    EXPECT_EQ(core.evaluateObjectiveGradient(grad.data(), static_cast<int>(grad.size())), 0);
+    EXPECT_EQ(core.evaluateObjectiveGradient(nullptr, 0), 0);
+
+    // 结构非空但长度 0 的请求同样是"要 0 个"，不是错误
+    int nnz = -1;
+    ASSERT_EQ(core.getConstraintJacobianStructure(nullptr, nullptr, &nnz), 0);
+    ASSERT_EQ(nnz, 0);
+    EXPECT_EQ(core.evaluateConstraintsJacobianValues(nullptr, 0), 0);
+
+    // 真要填值而缓冲为空，仍然是错误参数
+    ASSERT_EQ(core.numConstraints(), 2);
+    EXPECT_LT(core.evaluateConstraints(nullptr, 2), 0);
+}
+
+TEST(CapeOpenProblemEvaluateTest, NoConstraints_ZeroLengthRequest_ReturnsZero) {
+    auto owned = std::make_unique<ResizableStub>();
+    owned->n_con = 0;
+    CapeMINLPProblemCore core(std::move(owned));
+    ASSERT_EQ(core.initialize(), 0);
+    ASSERT_EQ(core.numConstraints(), 0);
+
+    std::vector<double> cons;
+    EXPECT_EQ(core.evaluateConstraints(cons.data(), 0), 0);
+    EXPECT_EQ(core.evaluateConstraintsJacobianValues(nullptr, 0), 0);
+}
+
+// 同一条路径经 C vtable 走一遍：生产里宿主拿的是 trampoline，不是 C++ 方法。
+TEST(CapeOpenProblemEvaluateTest, EmptyObjectiveGradient_ViaVtable_ReturnsZero) {
+    auto* core = new CapeMINLPProblemCore(std::make_unique<ResizableStub>());
+    ASSERT_EQ(core->initialize(), 0);
+    xOptProblemT pt{sizeof(xOptProblemT)};
+    core->fillVtable(&pt);
+
+    int gsz = -1;
+    ASSERT_EQ(pt.getObjectiveGradientStructure(pt.handle, nullptr, &gsz), 0);
+    ASSERT_EQ(gsz, 0);
+    EXPECT_EQ(pt.evaluateObjectiveGradient(pt.handle, nullptr, 0), 0);
+    EXPECT_EQ(pt.evaluateConstraintsJacobianValues(pt.handle, nullptr, 0), 0);
+
+    pt.destroyProblem(pt.handle);
+}
+
 #ifndef USE_GTEST_MAIN
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
