@@ -6,6 +6,8 @@
 // ***************************************************************
 #include "CapeMINLPModelCorba.h"
 
+#include "XOPTCO_ExtC.h"  // IXOptUnitExtension：目标是单元时经它取 ICapeMINLP
+
 #include <tao/ORB.h>
 
 #include "CapeCorbaMarshal.h"
@@ -41,9 +43,32 @@ int CapeMINLPModelCorba::connect() {
             orb_owned_ = true;
         }
         CORBA::Object_var obj = sharedOrb()->string_to_object(target_.c_str());
+
+        // 目标可以是两种东西之一：
+        //   1. 一个 ICapeMINLP —— 本项目原有的通路，直接用；
+        //   2. 一个 IXOptUnitExtension（单元）—— 问题在它的 GetMINLP() 后面。
+        // 先试单元：CAPE-OPEN 把拓扑和问题分在两份规范里，谁也不指向谁，而
+        // 消费端只有一个连接串。让单元交出问题，比让用户配两个地址并自己保证
+        // 它们指的是同一个模型要可靠。
+        // 顺序不能反：单元不是 ICapeMINLP，先试 MINLP 会白费一次远端 _is_a。
+        {
+            ::XOPTCO::IXOptUnitExtension_var unit =
+                ::XOPTCO::IXOptUnitExtension::_narrow(obj.in());
+            if (!CORBA::is_nil(unit.in())) {
+                CORBA::Object_var minlp_obj = unit->GetMINLP();
+                minlp_ = ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP::_narrow(
+                    minlp_obj.in());
+                if (CORBA::is_nil(minlp_.in())) {
+                    return fail("connect: the unit's GetMINLP() did not give an ICapeMINLP");
+                }
+                return 0;
+            }
+        }
+
         minlp_ = ::CAPEOPEN100::Business::Numeric::Minlp::ICapeMINLP::_narrow(obj.in());
         if (CORBA::is_nil(minlp_.in())) {
-            return fail("connect: _narrow to ICapeMINLP failed for '" + target_ + "'");
+            return fail("connect: _narrow to ICapeMINLP (nor to a unit) failed for '" +
+                        target_ + "'");
         }
         return 0;
     } catch (const CORBA::Exception& e) {

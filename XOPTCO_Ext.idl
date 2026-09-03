@@ -1,0 +1,160 @@
+// ============================================================================
+//  XOPTCO_Ext.idl
+//  --------------------------------------------------------------------------
+//  This file is a part of project xRtoCapeOpen.
+//
+//  HAND-WRITTEN. This is OUR interface, not a reconstruction of anything.
+//  Do not confuse it with CAPEOPEN100_Minlp.idl / CAPEOPEN100_Unit.idl, which
+//  are reconstructions of the CAPE-OPEN standard -- this one is deliberately
+//  in its own module (XOPTCO) with its own Repository IDs so that no third
+//  party, and nobody reading this repository later, can mistake it for
+//  CAPE-OPEN.
+// ============================================================================
+//  WHY IT EXISTS
+//
+//  Wiring a remote model into a flowsheet needs three things that the CAPE-OPEN
+//  MINLP + Unit Operation subset cannot express between two peers on its own:
+//
+//   1. The component (compound) list.
+//      In full CAPE-OPEN the unit does not publish this. The PME creates a
+//      Material Object, connects it to a port with ICapeUnitPort::Connect, and
+//      the unit reads the compounds off it with ICapeThermoMaterialObject.
+//      That requires the client to *serve* CORBA objects (a POA and an ORB
+//      thread inside the consumer DLL) and pulls the whole Thermo interface
+//      family in. Out of scope for now; see PHASE 2 below.
+//
+//   2. Enumerating a port's variables.
+//      ICapeUnitPortVariables is setter-oriented -- SetIndex/GetIndex assume
+//      the caller already knows which (variable type, compound) pairs exist.
+//      The standard has no "list the variables of this port" operation, because
+//      in CAPE-OPEN that knowledge comes from the connected Material Object
+//      (again) rather than from the port.
+//
+//   3. The fixable variables and their default values.
+//      xOpt's flowsheet asks a model which variables the user may pin
+//      (feed T/P/flows and the like). CAPE-OPEN has no equivalent concept --
+//      the closest thing, the parameter collection, is for tuning knobs, not
+//      for variables of the problem.
+//
+//  Everything else -- port topology, port direction, port names, connect and
+//  disconnect -- goes over the reconstructed standard interfaces in
+//  CAPEOPEN100_Unit.idl. This file adds the three gaps above and nothing more.
+//
+//  PHASE 2 (what would remove this file)
+//    Implement ICapeThermoMaterialObject on the consumer side, run a POA there,
+//    and Connect a Material Object to each port. Then (1) and (2) both come
+//    from the standard and only (3) remains -- and (3) could be carried in the
+//    parameter collection if we decided to abuse it that way.
+//
+//  ASCII-only, same reason as the reconstructed files: tao_idl preprocesses
+//  with cl.exe and CP936 eats the newline after a full-width character.
+// ============================================================================
+#ifndef XOPTCO_Ext_idl
+#define XOPTCO_Ext_idl
+
+// For ICapeUnit (inherited below) plus CapeString / CapeArrayString /
+// CapeArrayDouble and the error exceptions. CAPEOPEN100_Unit.idl itself
+// includes the Minlp file, which is where Common::Types and Common::Error live.
+#include "CAPEOPEN100_Unit.idl"
+
+module XOPTCO {
+
+  // One entry of a port's variable map.
+  //   streamName   the name the flowsheet uses on the stream side. By the
+  //                platform convention that is "T", "P", or "fi_<compound>"
+  //                (see examples/Readme.md section 6.1).
+  //   variableName the model's own internal variable name, e.g. "in_fi_C1".
+  // The pair is exactly what xOptModelT::get{In,Out}PortVariableMap has to
+  // hand back to the host, which is the reason this struct has this shape.
+  struct XOptPortVariable {
+    ::CAPEOPEN100::Common::Types::CapeString streamName;
+    ::CAPEOPEN100::Common::Types::CapeString variableName;
+  };
+  typedef sequence<XOptPortVariable> XOptPortVariableSeq;
+
+  // Inherits ICapeUnit rather than sitting beside it, for a mechanical reason:
+  // a servant implementing two unrelated POA skeletons would have to
+  // disambiguate _is_a and _primary_interface by hand. With IDL inheritance TAO
+  // generates a single skeleton, one servant, one object reference -- and a
+  // client that only knows CAPE-OPEN still narrows to ICapeUnit and works,
+  // losing nothing but the ability to wire the model up automatically.
+  interface IXOptUnitExtension
+      : ::CAPEOPEN100::Business::UnitOp::Unit::ICapeUnit {
+
+    // The compound list the model is currently configured for. Empty when the
+    // model has no slate at all (a pure optimisation problem, for instance).
+    ::CAPEOPEN100::Common::Types::CapeArrayString GetComponents()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    // The variable map of one port, addressed by the port's name -- the name
+    // ICapeIdentification::GetComponentName reports on the ICapeUnitPort
+    // obtained from ICapeUnit::GetPorts. Addressing by name rather than by
+    // index keeps this interface from having to restate the port ordering that
+    // the standard collection already defines.
+    XOptPortVariableSeq GetPortVariableMap(
+        in ::CAPEOPEN100::Common::Types::CapeString portName)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    // Push the flowsheet's compound list down onto the model.
+    //
+    // In a flowsheet the slate belongs to the flowsheet, not to the model: the
+    // same unit gets whatever compounds the streams around it carry. CAPE-OPEN
+    // expresses that by having the unit read the compounds off the Material
+    // Object connected to a port, which needs the consumer to serve CORBA
+    // objects (see PHASE 2 above). Until that exists, this pushes the list
+    // directly.
+    //
+    // The model is rebuilt around the new list, so EVERYTHING derived from it
+    // changes: the port variable maps, the fixable variables, and the problem
+    // behind GetMINLP (its variable and constraint counts included). Port
+    // object references obtained before this call are stale -- re-read
+    // GetPorts afterwards. Callers that hold an ICapeMINLP from GetMINLP
+    // should re-read it too.
+    void SetComponents(in ::CAPEOPEN100::Common::Types::CapeArrayString components)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    // Push the host's choice of fixed variables down, and get the model's
+    // initial-value estimate back.
+    //
+    // Which variables are pinned is the flowsheet's call, not the model's: an
+    // inlet fed by an upstream stream must NOT be pinned, or the stream
+    // connection and the pin become two equations for one thing. The server's
+    // deployment description can only carry a default; the flowsheet knows.
+    //
+    // fixedNames and fixedValues are parallel and may both be empty, which
+    // means "pin nothing" -- that is a real answer, not "use your default".
+    //
+    // Like SetComponents this rebuilds the model, so ports, fixables and the
+    // problem behind GetMINLP all change; re-read them afterwards.
+    void GenerateEstimate(
+        in ::CAPEOPEN100::Common::Types::CapeArrayString fixedNames,
+        in ::CAPEOPEN100::Common::Types::CapeArrayDouble fixedValues,
+        out ::CAPEOPEN100::Common::Types::CapeArrayDouble initialX)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown,
+               ::CAPEOPEN100::Common::Error::ECapeInvalidArgument);
+
+    // The ICapeMINLP object carrying the same model's optimisation problem.
+    //
+    // CAPE-OPEN keeps the topology (Unit Operation) and the problem (MINLP) in
+    // two separate specifications, and neither one points at the other -- in a
+    // real PME the two are separate components that the flowsheet owns and
+    // relates. A consumer wrapping ONE remote model has no such flowsheet, so
+    // without this it would need two connection strings for one model and a
+    // convention for keeping them in step. One reference that hands out the
+    // other is the smaller lie.
+    ::CAPEOPEN100::Common::Types::CapeInterface GetMINLP()
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+
+    // Variables the flowsheet may pin, with the model's default value for each.
+    // names and defaults are parallel arrays of equal length.
+    void GetFixableVariables(
+        out ::CAPEOPEN100::Common::Types::CapeArrayString names,
+        out ::CAPEOPEN100::Common::Types::CapeArrayDouble defaults)
+        raises(::CAPEOPEN100::Common::Error::ECapeUnknown);
+  };
+
+}; // END XOPTCO
+
+#endif // XOPTCO_Ext_idl

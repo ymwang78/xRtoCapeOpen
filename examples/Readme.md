@@ -4,9 +4,13 @@
 一个求解器 DLL、以及"用该求解器求解该模型"的演示程序。CORBA 接入本体由架构师
 实施；这两个 DLL 就是未来 `xOptCorbaService` 需要托管/镜像的对象。
 
-示例工程**自包含**：只依赖 `include/xOpt/` 下复制进来的 4 个平台头文件
-（`xOptInterface.h`、`xOptModel.h`、`xOptProblem.h`、`xOptSolver.h`，
-源自 `zd-cxxproj/include/xOpt/`），不引用平台源码路径、不链接任何平台库。
+示例工程只依赖仓库根的 4 个平台头文件（`xOptInterface.h`、`xOptModel.h`、
+`xOptProblem.h`、`xOptSolver.h`），CMake 里以 `XOPT_INCLUDE_DIR =
+${CMAKE_CURRENT_SOURCE_DIR}/../../../include` 直接指过去——与
+`core/CMakeLists.txt`、`xOptMINLPco/CMakeLists.txt` 同一条路径。
+**不在本目录留副本**：副本会与平台头静默漂移，而 C ABI 上的漂移表现为
+`xOptModelT` 尾部字段错位，编译期没有任何征兆。
+除头文件外不引用平台源码路径、不链接任何平台库。
 
 ---
 
@@ -17,7 +21,6 @@ COExamples/
 ├── Readme.md                      # 本文档
 ├── CMakeLists.txt                 # 3 个目标，产物统一输出到 build/bin/<Config>
 ├── build.bat                      # 一键配置 + 构建(Release) + 运行
-├── include/xOpt/                  # 自包含头文件（平台接口副本）
 ├── testModel/
 │   ├── SplitterModel.cpp          # 黑箱模型：导出 xOptModel_createModel
 │   └── Splitter_Model.json        # 黑箱接入描述（部署时与 DLL 同目录）
@@ -89,9 +92,12 @@ JSON 参数通道（`setParametersJson`/`getParametersJson`）成对置 `NULL`�
   （默认 101.325）、`in_fi_*`（默认 1.0）——进料状态由上游/用户固定。
   `generateEstimate` 按宿主打包方式（固定变量名以 `'\0'` 分隔拼在连续缓冲里、
   值数组一一对应）解析固定值并缓存，随后按其填初值。
-  `buildProblem` 把进料固定**作为等式约束追加进问题**
-  （`in_T = 固定值` 等，等价于宿主 `xOptModelFixVars` 的效果），
-  保证示例问题独立适定。
+  `buildProblem` 把进料固定**作为等式约束追加进问题**（`in_T = 固定值` 等，
+  等价于宿主 `xOptModelFixVars` 的效果），但**只为宿主真的点过名的那些变量加**。
+  独立运行时 demo 把 4 个全固定，问题恰好方阵（12 变量 12 等式）；
+  接进流程图时进料由上游流股决定，宿主一个都不固定，这几条等式就不出现——
+  否则流股连接方程与自钉等式就成了同一件事的两个方程，值不一致直接不可行，
+  值一致也把雅可比压成降秩。2026-09 修正，此前是无条件添加的。
 
 ### 2.5 手算基准（demo 断言）
 
@@ -108,7 +114,8 @@ out2_fi_C1 = out2_fi_C2 = 0.5
 ## 3. 测试求解器：罚函数梯度下降（`testSolver/`）
 
 求解 `min f(x)  s.t. clow ≤ c(x) ≤ cupp, xlow ≤ x ≤ xupp`，
-底层向量运算用 Eigen（`Eigen3::Eigen`，vcpkg `eigen3:x64-windows-static-md`）。
+底层向量运算用 Eigen——取自仓库根的 `include/Eigen`，与 xOpt 头共用同一个
+include 目录，不经 vcpkg。
 
 ### 3.1 算法
 
@@ -157,12 +164,11 @@ out2_fi_C1 = out2_fi_C2 = 0.5
 
 ## 4. 构建与运行
 
-前置条件：
-
-- Visual Studio（x64 MSVC；本机为 VS2026，`build.bat` 优先使用 VS 自带
-  CMake 4.x——独立的旧版 cmake 不认识新 VS 生成器）；
-- `F:\vcpkg`，已 `vcpkg install eigen3:x64-windows-static-md`
-  （triplet 为 /MD 动态 CRT，与平台项目一致）。
+前置条件只有一条：**Visual Studio 2026（x64 MSVC）**。
+不需要 vcpkg——xOpt 的 4 个头文件与 Eigen 都在仓库根的 `include/` 下，
+`XOPT_INCLUDE_DIR` 一个 include 目录全覆盖。
+`build.bat` 会优先用 VS 自带的 CMake 4.x（独立的旧版 cmake 不认识新 VS 生成器），
+并按 Enterprise / Professional / Community / BuildTools 的顺序探测本机装的是哪个版本。
 
 一键复现：
 
@@ -173,9 +179,7 @@ build.bat
 等价手工步骤：
 
 ```
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 ^
-      -DCMAKE_TOOLCHAIN_FILE=F:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
+cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 build\bin\Release\xopt_demo.exe
 ```
@@ -292,6 +296,28 @@ fixable 变量与端口映射来自 JSON 而非 DLL 函数。**demo 走 DLL 函�
 - 端口映射返回的 `const char*` 必须活得够久（存成员容器，别返回临时 `string`）。
 - `XOPTIF_API`：导出方在包含头文件前 `#define XOPTIF_API __declspec(dllexport)`；
   纯消费方（如 demo）定义为空，避免 `dllimport` 修饰造成链接问题。
+
+### 6.4 作为 CAPE-OPEN 组件发布（现状）
+
+本目录的**模型**已经能经 `xOptMINLPco` 发布成 CAPE-OPEN `ICapeMINLP`
+（COM 或 CORBA）——`XOptMINLPAdapter` 认 `xOptModel_createModel` 这条 C ABI，
+并会按同目录的 `Splitter_Model.json` 重放宿主的初始化握手（参数 -> `setSlate`
+-> `validateModel` -> 可固定变量 + `generateEstimate`），见
+`docs/xOptMINLPco_design.md` §6.9。实测：`nv=12, nc=14, jacobian nnz=22`，
+与上文 demo 的数字一致。
+
+**端口也通了**（2026-09）：`CAPEOPEN100_Unit.idl` 补上了 `ICapeUnit`/`ICapeUnitPort`，
+服务端 `--unit-ior-file` 发布单元对象，消费端把端口、组分表、可固定变量读回来填进
+`xOptModelT`，于是 `Splitter_Corba` 在 xRto 里**可以接线**。实测进口
+`T->in_T P->in_P fi_C1->in_fi_C1 fi_C2->in_fi_C2`，两个出口同款。
+细节见 `docs/xOptMINLPco_design.md` §6.10。
+
+**求解器还不行**。CAPE-OPEN 的求解器侧是 `ICapeMINLPSolverManager` +
+`ICapeMINLPSystem`，仓库里这两个接口只有 IDL 声明、COM IID 常量与 RID 断言，
+**服务端零实现、客户端零调用**。把 `PenaltyGradientSolver` 变成 CO 求解器还需要：
+两个接口的服务端、`Solve()` 后经 `SetMINLPVariableValues` 写回解，
+以及 `ICapeMINLPSystem::GetParameters` 要返回的参数集合——
+而 `CAPEOPEN100_Minlp.idl` 里目前没有 `ICapeCollection`/`ICapeParameter` 模块。
 
 ## 7. 给架构师的 CORBA 提示
 

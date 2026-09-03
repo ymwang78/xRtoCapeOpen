@@ -159,6 +159,9 @@
   <ItemGroup>
     <!-- xOptMINLPco 自身 -->
     <ClCompile Include="XOptMINLPAdapter.cpp" />
+    <!-- 适配器引用 XOptModelDesc::discover/load；漏了这一行 MSBuild 会以
+         LNK2001 + LNK1120 收场，而 CMake 那条路是通的 —— 两个构建入口都得维护 -->
+    <ClCompile Include="XOptModelDesc.cpp" />
     <ClCompile Include="CoMINLP.cpp" />
     <ClCompile Include="xOptMINLPcoServer.cpp" />
     <!-- capeopen_core 中 COM 发布所需的最小源（官方 IID + VARIANT marshaling）-->
@@ -167,6 +170,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="XOptMINLPAdapter.h" />
+    <ClInclude Include="XOptModelDesc.h" />
     <ClInclude Include="CoMINLP.h" />
     <ClInclude Include="xOptMINLPcoClsid.h" />
     <ClInclude Include="..\core\CapeMINLPModel.h" />

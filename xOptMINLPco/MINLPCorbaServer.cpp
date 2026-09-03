@@ -17,10 +17,19 @@
 //    外部 PME / 第三方 ORB 只能走 (2)。
 //
 //  用法：
-//    xOptMINLPcoCorbaServer --problem-dll <path> [--ior-file <path>]
+//    xOptMINLPcoCorbaServer --problem-dll <path> [--model-desc <path>]
+//                           [--ior-file <path>] [--unit-ior-file <path>]
+//                           [--unit-name <path>]
+//
+//  发两个对象，因为 CAPE-OPEN 把两件事放在两份规范里：
+//    ICapeMINLP        问题（变量/约束/导数）      --ior-file / --name
+//    ICapeUnit(+扩展)  接线（端口/组分/可固定量）  --unit-ior-file / --unit-name
+//  单元对象的 GetMINLP() 会交出前者，所以消费端只连单元这一个地址就够了；
+//  --ior-file 保持原样是为了不动既有的 MINLP 直连通路与它的两条跨进程测试。
 //                           [-ORBEndpoint iiop://host:port] ...
 //  -ORB* 参数由 ORB_init 消费，其余由本文件解析。被包装的 xOptProblem DLL
-//  也可用环境变量 XRTO_XOPT_PROBLEM_DLL 指定（--problem-dll 优先）。
+//  也可用环境变量 XRTO_XOPT_PROBLEM_DLL / XRTO_XOPT_MODEL_DESC 指定
+//  （命令行参数优先）。
 //
 //  IOR 同时打到 stdout 和 --ior-file。文件写入是原子的（先写 .tmp 再改名），
 //  否则轮询这个文件的客户端会读到半截 IOR。
@@ -47,6 +56,8 @@
 #include <string>
 
 #include "MINLPServant.h"
+#include "UnitServant.h"
+#include "XOptMINLPAdapter.h"
 
 namespace {
 
@@ -83,9 +94,18 @@ BOOL WINAPI onConsoleCtrl(DWORD type) {
 // 控制台默认 GBK 代码页——中文在那里会变成乱码，正好毁掉演示。注释仍用中文。
 void usage(const char* argv0) {
     std::cerr << "Usage: " << argv0
-              << " --problem-dll <path> [--ior-file <path>] [--name <path>] [-ORB<...>]\n"
+              << " --problem-dll <path> [--model-desc <path>] [--ior-file <path>]"
+              << " [--name <path>] [-ORB<...>]\n"
               << "  --problem-dll <path>  xOptProblem DLL to wrap"
               << " (or set env XRTO_XOPT_PROBLEM_DLL)\n"
+              << "  --unit-ior-file <path> write the ICapeUnit IOR here (topology: ports,"
+              << " components, fixables)\n"
+              << "  --unit-name <path>    bind the ICapeUnit into the Naming Service under"
+              << " this name\n"
+              << "  --model-desc <path>   model description JSON for a C-ABI black-box model"
+              << " (or set env XRTO_XOPT_MODEL_DESC);\n"
+              << "                        omit it and the unique *_Model.json next to the DLL"
+              << " is used\n"
               << "  --ior-file <path>     write the IOR to this file (atomically);"
               << " stdout only if omitted\n"
               << "  --name <path>         also bind into the Naming Service; path is '/'-separated,\n"
@@ -94,11 +114,11 @@ void usage(const char* argv0) {
               << "  -ORB* args (e.g. -ORBEndpoint iiop://host:port) are consumed by ORB_init\n";
 }
 
-void setProblemDllEnv(const std::string& path) {
+void setEnvVar(const char* name, const std::string& value) {
 #ifdef _WIN32
-    _putenv_s("XRTO_XOPT_PROBLEM_DLL", path.c_str());
+    _putenv_s(name, value.c_str());
 #else
-    setenv("XRTO_XOPT_PROBLEM_DLL", path.c_str(), 1);
+    setenv(name, value.c_str(), 1);
 #endif
 }
 
@@ -144,8 +164,12 @@ CosNaming::NamingContext_ptr resolveNaming(CORBA::ORB_ptr orb) {
 bool bindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ref) {
     CosNaming::NamingContext_var root = resolveNaming(orb);
     if (CORBA::is_nil(root.in())) {
-        std::cerr << "cannot resolve NameService"
-                  << " (pass -ORBInitRef NameService=corbaloc:iiop:host:port/NameService)\n";
+        // 两件事都要说：既得有一个在跑的 naming service，也得告诉本进程它在哪。
+        // 只说后者，第一次用 --name 的人会以为补个 -ORBInitRef 就完事了。
+        std::cerr << "cannot resolve NameService -- is one running, and were we told where?\n"
+                  << "  1) start it:  tao_cosnaming.exe -ORBEndpoint iiop://localhost:24567\n"
+                  << "  2) tell us:   -ORBInitRef NameService=corbaloc:iiop:localhost:24567/NameService\n"
+                  << "  clients then use:  corbaname::localhost:24567#<name>\n";
         return false;
     }
     const CosNaming::Name name = toName(path);
@@ -168,7 +192,24 @@ bool bindName(CORBA::ORB_ptr orb, const std::string& path, CORBA::Object_ptr ref
             } catch (const CosNaming::NamingContext::AlreadyBound&) {
                 CORBA::Object_var o = ctx->resolve(one);
                 CosNaming::NamingContext_var sub = CosNaming::NamingContext::_narrow(o.in());
-                if (CORBA::is_nil(sub.in())) return false;
+                if (CORBA::is_nil(sub.in())) {
+                    // 这一级已经被绑成了一个**对象**，不是上下文。最常见的成因是
+                    // 拿 --name 的名字当 --unit-name 的父级（--name a
+                    // --unit-name a/b）：a 先被 rebind 成 ICapeMINLP，再想往
+                    // a 底下挂东西就不成立了。CosNaming 里一个名字只能是二者之一。
+                    // 先前这里是光秃秃的 return false，调用方只能打出一句笼统的
+                    // "failed to bind"，看的人无从下手。
+                    const char* level = name[i].id.in();
+                    std::cerr << "Naming Service: '" << (level != nullptr ? level : "")
+                              << "' is already bound to an object, so it cannot also be a"
+                                 " naming context for '" << path << "'.\n"
+                              << "  a name is either an object or a context, never both --"
+                                 " use sibling names\n"
+                              << "  (--name testsplitter --unit-name testsplitter_unit)"
+                                 " or put both under a shared context\n"
+                              << "  (--name xopt/minlp --unit-name xopt/unit).\n";
+                    return false;
+                }
                 ctx = sub._retn();
             }
         }
@@ -244,8 +285,11 @@ bool writeIorFileAtomically(const std::string& path, const char* ior) {
 
 int main(int argc, char** argv) {
     std::string problem_dll;
+    std::string model_desc;
     std::string ior_file;
     std::string bind_path;
+    std::string unit_ior_file;
+    std::string unit_bind_path;
 
     try {
         // ORB_init 先跑：它会就地摘掉 -ORB* 参数，剩下的才轮到我们解析。
@@ -255,10 +299,16 @@ int main(int argc, char** argv) {
             const std::string a = argv[i];
             if (a == "--problem-dll" && i + 1 < argc) {
                 problem_dll = argv[++i];
+            } else if (a == "--model-desc" && i + 1 < argc) {
+                model_desc = argv[++i];
             } else if (a == "--ior-file" && i + 1 < argc) {
                 ior_file = argv[++i];
             } else if (a == "--name" && i + 1 < argc) {
                 bind_path = argv[++i];
+            } else if (a == "--unit-ior-file" && i + 1 < argc) {
+                unit_ior_file = argv[++i];
+            } else if (a == "--unit-name" && i + 1 < argc) {
+                unit_bind_path = argv[++i];
             } else if (a == "--help" || a == "-h") {
                 usage(argv[0]);
                 return 0;
@@ -269,7 +319,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        if (!problem_dll.empty()) setProblemDllEnv(problem_dll);
+        if (!problem_dll.empty()) setEnvVar("XRTO_XOPT_PROBLEM_DLL", problem_dll);
+        if (!model_desc.empty()) setEnvVar("XRTO_XOPT_MODEL_DESC", model_desc);
 
         CORBA::Object_var poa_obj = orb->resolve_initial_references("RootPOA");
         PortableServer::POA_var poa = PortableServer::POA::_narrow(poa_obj.in());
@@ -283,8 +334,11 @@ int main(int argc, char** argv) {
         MINLPServant* servant = new MINLPServant();
         PortableServer::ServantBase_var servant_owner(servant);  // 出作用域 _remove_ref
         if (!servant->ok()) {
-            std::cerr << "servant not ready: the xOptProblem DLL was not given or failed to load"
-                      << " (--problem-dll / XRTO_XOPT_PROBLEM_DLL)\n";
+            // 把 adapter 的原话透出去：模型初始化失败的原因（参数名不认、缺组分表、
+            // validateModel 没过……）都在那句话里，压成一句 "not ready" 等于把
+            // 唯一的线索扔掉。
+            std::cerr << "servant not ready: " << servant->initError()
+                      << " (--problem-dll / --model-desc)\n";
             return 4;
         }
 
@@ -314,6 +368,45 @@ int main(int argc, char** argv) {
                   << (ior_file.empty() ? "" : (" (IOR written to " + ior_file + ")"))
                   << (bind_path.empty() ? "" : (" (bound as " + bind_path + ")")) << "\n";
 
+        // ---- ICapeUnit（+ XOPTCO 扩展）：接线信息 ----
+        // 只有 C-ABI 模型才有端口；C++ ABI 的 createProblem 输入没有模型这一层，
+        // adapter 的 ports() 会是空的，那时发一个零端口的单元也没有意义。
+        // 引用与 ObjectId 提到块外：关停时要用它们解绑名字、注销对象。留在块内
+        // 的话，unit 名字会在进程死后继续解析到一个死引用——正是 unbindName
+        // 那段注释想避免的情形，而 xRto 解析的就是这个名字。
+        CORBA::Object_var unit_ref;
+        PortableServer::ObjectId_var unit_oid;
+        if (servant->ownedAdapter() != nullptr && !servant->ownedAdapter()->ports().empty()) {
+            UnitServant* unit = new UnitServant(servant->ownedAdapter(), poa.in(), ref.in());
+            PortableServer::ServantBase_var unit_owner(unit);
+            unit_oid = poa->activate_object(unit);
+            unit_ref = poa->id_to_reference(unit_oid.in());
+            CORBA::String_var unit_ior = orb->object_to_string(unit_ref.in());
+
+            // 与 MINLP 那边同样的顺序：先绑名字再落盘（理由见上面那段注释）。
+            if (!unit_bind_path.empty() &&
+                !bindName(orb.in(), unit_bind_path, unit_ref.in())) {
+                std::cerr << "failed to bind the unit into the Naming Service: "
+                          << unit_bind_path << "\n";
+                return 7;
+            }
+            if (!unit_ior_file.empty() &&
+                !writeIorFileAtomically(unit_ior_file, unit_ior.in())) {
+                std::cerr << "failed to write the unit IOR file: " << unit_ior_file << "\n";
+                return 5;
+            }
+            std::cerr << "xOptMINLPcoCorbaServer: ICapeUnit published ("
+                      << servant->ownedAdapter()->ports().size() << " ports)"
+                      << (unit_ior_file.empty() ? "" : (" (IOR written to " + unit_ior_file + ")"))
+                      << (unit_bind_path.empty() ? "" : (" (bound as " + unit_bind_path + ")"))
+                      << "\n";
+        } else if (!unit_ior_file.empty() || !unit_bind_path.empty()) {
+            // 要了单元却发不出来，必须说清楚：静默跳过会让消费端一路连到超时。
+            std::cerr << "--unit-ior-file/--unit-name given, but the wrapped model exposes no"
+                         " ports (a C++-ABI createProblem DLL has no model layer at all)\n";
+            return 6;
+        }
+
         std::signal(SIGINT, onSignal);
         std::signal(SIGTERM, onSignal);
 #ifdef _WIN32
@@ -333,7 +426,12 @@ int main(int argc, char** argv) {
         std::cerr << "xOptMINLPcoCorbaServer: shutting down\n";
         // 先解绑再停服：反过来的话，名字会在 ORB 已经不收请求之后仍短暂可解析，
         // 客户端拿到引用、第一次调用才失败，比「名字不存在」难查得多。
+        // 单元名字先解：它才是流程图里被解析的那个（corbaname:...#xopt/unit）。
+        if (!unit_bind_path.empty() && !CORBA::is_nil(unit_ref.in())) {
+            unbindName(orb.in(), unit_bind_path, unit_ref.in());
+        }
         if (!bind_path.empty()) unbindName(orb.in(), bind_path, ref.in());
+        if (!CORBA::is_nil(unit_ref.in())) poa->deactivate_object(unit_oid.in());
         poa->deactivate_object(oid.in());
         orb->shutdown(/*wait_for_completion*/ false);
         orb->destroy();

@@ -73,6 +73,16 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
   - [x] CAPE-OPEN 组件类别注册（issue #5，2026-08）——见 §6.7。
   - 构建注记：DLL 导入库改名 `xOptMINLPco_import.lib` 避免与静态库 `xoptminlpco.lib` 大小写冲突
     （LNK1149）；`<olectl.h>` 提供 `SELFREG_E_CLASS`；本机构建用 `-DVCPKG_APPLOCAL_DEPS=OFF`（applocal 缺 dumpbin）。
+  - 构建注记（2026-09）：**DLL 的 CMake target 名改为 `xoptminlpco_dll`**，`OUTPUT_NAME`
+    仍是 `xOptMINLPco`，产物与注册表项一字不变。原先 target 叫 `xOptMINLPco`，与静态
+    核心库 `xoptminlpco` 只差大小写，而 Visual Studio 生成器按 target 名产出
+    `<名字>.vcxproj`——在大小写不敏感的文件系统上两个工程文件是同一个，MSBuild
+    解析工程引用时绕成环，报 `MSB4006 ... ResolveProjectReferences ... 循环依赖`，
+    整个解决方案建不动。这与上一条导入库改名是同一个撞车的两个层面：
+    那条撞的是 `.lib`，这条撞的是 `.vcxproj`。
+    之所以拖到现在才发现：Ninja 不产工程文件，日常验证走的是它。改后两种生成器
+    都建得过、各自 10/10 通过。
+    （`project(xOptMINLPco)` 不参与此事——它生成的是 `.sln`，扩展名不同。）
 - **N3 — COM 注册 + 激活冒烟**  ✅ 已落地（2026-06）
   - [x] `ICapeIdentification`（官方 IID `{678C0990-…}`，名称/描述）加到 `CoMINLP`（多继承
     `ICapeMINLP`+`ICapeIdentification`，单份 IUnknown/IDispatch 覆盖两个基类）。
@@ -130,6 +140,9 @@ xOptProblem C++ DLL (createProblem/destroyProblem)
     msbuild Release|x64 验证导出 4 个 COM 入口。CORBA 前端因需环境相关的 TAO 路径，仍由 CMake 构建。
   - [x] 独立进程 CORBA server（IOR）已落地，见上方 N4（2026-08）。
   - [x] CAPE-OPEN 组件类别注册（issue #5）——见 §6.7。
+  - [x] **C-ABI 模型的初始化序列**（2026-09）——见 §6.9。N5 当初只接通了
+    `xOptModel_createModel` -> `buildProblem` 这两步，中间那段宿主握手漏了，
+    于是"C ABI 已支持"对真实黑箱模型并不成立。
   - [ ] 待办：正式 install 规则（尚未开 issue）。
 
 ## 5. 风险
@@ -493,6 +506,187 @@ Service，客户端用 `corba:corbaname::host:port#<名字>` 连接。
 naming 起在固定端口上，因为客户端这一侧没法传 `-ORBInitRef`——消费端调的是
 `ORB_init(0, nullptr)`。固定端口后 `corbaname::host:port#name` 自带地址，不依赖客户端 ORB 的
 初始引用配置。
+
+### 6.9 C-ABI 模型的初始化序列（2026-09）
+
+**症状**。拿 `examples/` 的 Splitter（一个真实形状的 C-ABI 黑箱模型 DLL）喂给
+`XOptMINLPAdapter`，`connect()` 报 `buildProblem failed`，此外没有任何信息。
+
+**病灶**。N5 把 C ABI 的接入写成了
+
+```
+xOptModel_createModel(&model, ...) -> model.buildProblem(model.handle, &pt)
+```
+
+两步直连。但宿主（`xOptModelBlackBox`）在这两步之间还有一段握手：
+
+```
+getParameters -> setParameters（回送）
+setSlate（每个 slate 一次）
+validateModel
+getFixableVariables -> generateEstimate（固定值按 '\0' 分隔打包）
+buildProblem
+```
+
+Splitter 的 `buildProblem` 第一件事就是 `validate()`，而 `validate()` 要求
+`slate_set_`——组分表没给，问题的变量个数（`3N+6`）根本定不下来。所以不是
+Splitter 特殊，是**凡"变量集合取决于组分表/参数"的单元模型都会这样**，
+这类模型正是黑箱接入的主要对象。
+
+**为什么这段信息不能从 DLL 里拿**。DLL 只报"我需要几个 slate、我有哪些参数、
+哪些变量可以固定"，具体给什么组分、参数取什么值、固定在多少，是部署决定的。
+宿主从描述 JSON 拿（`UnitModel/<名称>/<名称>_Model.json`），我们也从那里拿。
+
+**做法**（`XOptModelDesc` + `XOptMINLPAdapter::initModel`）：
+
+- 描述来源：显式路径（`XOptMINLPAdapter(dll, desc)`；COM 前端读
+  `XRTO_XOPT_MODEL_DESC`，CORBA server 用 `--model-desc`），或在 DLL 同目录
+  自动发现唯一的 `*_Model.json`——部署形态本来就是 DLL 与描述同目录。
+  同目录有多份时**报错而不是挑一个**：挑一个会让"换了 json 却没生效"成为静默行为。
+- 组分表：优先取显式的 `"slate"/"components"` 或 `"components"`；没有就从
+  `inports`/`outports` 的流股变量名里按 `fi_<组分>` 推（`examples/Readme.md` §6.1
+  的约定），首次出现顺序去重。取的是 value（流股侧）不是 key——模型内部变量
+  怎么命名是模型的自由。
+- 每一步按函数指针判空跳过（`xOptModelT` 的成员都是可选的），但**"描述里配了、
+  模型却用不上"一律报错**：参数名模型不认、固定了一个不可固定的变量、
+  模型压根没有参数通道——静默丢弃会让"我明明配了 `split_ratio=0.7`"
+  变成模型照跑默认值，全程没有一句提示。
+- `generateEstimate` 的初值估计若维数与问题一致，盖过问题自己的 `getInitialX`：
+  固定进料之类的效果体现在那份向量里，宿主也是这么取的。
+- JSON 解析器是自己写的（`XOptModelDesc.cpp`，RFC 8259 全语法含 `\u` 与代理对）。
+  不引第三方库：本仓库除 xOpt 的 4 个头文件外不依赖仓库其余部分（AGENTS.md），
+  为一个五键的描述文件把那条边界撑开不划算。数字走 `classic` locale 而不是
+  `strtod`——这是个服务进程，locale 由宿主决定，`de_DE` 下 `strtod("0.5")` 给 0。
+
+**测试**（`tests/test_xoptminlpco_modeldesc.cpp` + `tests/mock_xoptmodel_dll.cpp`）。
+夹具是一个刻意要求完整握手才肯 `buildProblem` 的 C-ABI 模型 DLL，三个部署输入
+各自可观察：组分表 -> 规模、参数 -> 雅可比值、固定值 -> 初值。
+**已反向验证**：把 `initModel` 改成直接 return 0，6 条端到端断言全红，且失败信息
+退回改动前那句没有指向的 `connect: buildProblem failed`。
+
+真实模型上也验过：Splitter DLL + 它自带的 `Splitter_Model.json`（自动发现）
+经 adapter 得到 `nv=12, nc=14, jacobian nnz=22`、进料初值
+`in_T=300 / in_P=101.325 / in_fi=1`，与 `examples/Readme.md` 里 demo 的数字一致。
+
+**仍然不在范围内**：JSON 参数通道（`setParametersJson`）没有接。当前走数值通道，
+模型两个 JSON 函数为 NULL 时行为正确；若将来遇到参数值本身是名字或数组的模型
+（`xOptModel.h` 里 RadFrac 那个例子），需要把描述里的 `parameters` 原样透传过去。
+
+### 6.10 Unit Operation 通路：让远端模型在流程图上可接线（2026-09）
+
+**问题**。`ICapeMINLP` 只承载优化问题——变量、约束、界、稀疏结构、导数。
+端口与组分表根本不在这个接口里（那是 Unit Operations 与 Thermo 的地盘），
+所以经 CORBA 过来的模型在 xRto 里是一个**连不了线的整块问题**：
+`xOptModelCapeOpen.cpp` 的 `getInPortNum`/`getOutPortNum`/`get*PortVariableMap`/
+`getNumberOfSlate`/`getFixableVariables` 全是返回 0 的桩。
+
+**IDL**。`CAPEOPEN100_Unit.idl`（重建，`tools/gen_capeopen_unit_idl.py`）补上
+`Common::{Collection,Utilities,Parameter}` 与 `Business::UnitOp::Unit::{ICapeUnit,
+ICapeUnitPort,ICapeUnitReport,ICapeUnitPortVariables}`，13 接口 50 操作。
+
+- 官方 CORBA IDL **再次确认拿不到**（2026-09 复查）：CO-LaN 的 "CAPE-OPEN IDL"
+  下载区只有两个文档集 zip、COM TLB/PIA 安装包和一份 TLB 指南；源码浏览器 403。
+- **一个陷阱**：`docs/.../07_CO_Sequential_Modular_Specific_Tools.zip` 里有三个
+  真的 `.idl`，但 `box/idl/notes.txt` 写着它们来自 "proto v5"、`non normalises CO`，
+  内容也印证——没有任何 module、`CapeDoubleSequence` 而非 `CapeArrayDouble`、
+  `CapeUNKNOWN` 而非 `ECapeUnknown`。前标准原型，不能当源。
+- **模块路径有据**：`Methods&Tools_Integrated_Guidelines.pdf` p.56-60 完整复现了
+  官方 IDL 的模块骨架，`Business::UnitOp::Unit` 由此而来；同一页也**反向确认了**
+  §6.1 定下的 `Business::Numeric::Minlp`。
+- **交叉核对用类型库**：`CAPE-OPENv1-0-0.tlb`（CO-LaN 自编自发，装在
+  `%CommonProgramFiles%\CAPE-OPEN\Type Libraries\`，typelib 名 `CAPEOPEN100`，
+  160 个条目）。生成器逐个接口比对操作集，对不上就拒绝出文件。它当场抓到一处：
+  `ICapeArrayParameterSpec` 规范 p.36 印的是 `ItemsSpecification`（单数），
+  类型库是 `ItemsSpecifications`（复数）——按既定规矩以类型库为准。
+- 编译途中踩到 `context` 与 `component` 都是 OMG IDL 关键字（IDL3/CCM），
+  规范里的参数名照抄编不过，已改名（不影响 RID 与线上格式）。
+- `tests/test_capeopen100_unit_rid.cpp` 把 RID 全部钉死，包括"重开 module 没有
+  改掉 Minlp 那批已有 RID"这一条——那是"两份 IDL 共用 Common::*"唯一可能出错的地方。
+
+**我们自己的扩展**（`XOPTCO_Ext.idl`，手写，**不是**重建）。
+CAPE-OPEN 的 MINLP+UO 子集有三件事两个对等端之间表达不了：组分表（要靠往端口
+Connect 一个 Material Object，再经 Thermo 接口读）、枚举一个端口的变量
+（`ICapeUnitPortVariables` 是 setter 取向的，只能按 (类型,组分) 逐个问）、
+以及可固定变量（CO 里没有这个概念）。于是加一个 `IXOptUnitExtension`，
+**刻意放在 XOPTCO 模块下**，RID 是 `IDL:XOPTCO/IXOptUnitExtension:1.0`——
+测试里有一条专门断言它不带 CAPE-OPEN 的 RID，防的不是手滑，是"哪天有人觉得
+放进 CAPEOPEN100 更整齐"。它继承 `ICapeUnit`，所以只生成一个 POA 骨架，
+而第三方 CAPE-OPEN 客户端仍能 `_narrow` 到 `ICapeUnit`。
+
+**实现**。
+
+- 生产端 `xOptMINLPco/UnitServant.{h,cpp}`：`UnitServant` + `PortServant` +
+  `PortCollectionServant`。端口/组分/可固定量在 `XOptMINLPAdapter::initModel`
+  里一次抓完并按值缓存——`buildProblem` 之后模型就定了，而 servant 会被远端
+  随时调用，每次回头碰 `xOptModelT` 就得考虑线程安全。
+  `ICapeCollection::Item` 的下标**从 1 开始**，与 `vids`/`cids` 同一套约定。
+- 服务端 `--unit-ior-file` / `--unit-name` 发布单元对象；`--ior-file` / `--name`
+  仍然发 `ICapeMINLP`，两条既有跨进程测试不受影响。
+- 单元的 `GetMINLP()` 交出同一模型的 `ICapeMINLP`，所以**消费端一个连接串就够**。
+  `CapeMINLPModelCorba::connect()` 先试 narrow 到单元，成功就走 `GetMINLP()`，
+  否则退回原来的直接 narrow——老部署不受影响。
+- 消费端 `core/backend/corba/CapeUnitCorba.{h,cpp}`：连上、读完、断开。与问题
+  后端分开是因为生命周期不同——`buildProblem` 会把问题后端交给
+  `CapeMINLPProblemCore` 拥有，而宿主在那之前就要问端口。
+- `xOptModelCapeOpen.cpp` 的端口回调改为真转发，返回的 `const char*` 指向缓存
+  的 `std::string`，与模型对象同寿。
+- **slate 下推**（2026-09，第二版）。第一版是"只核对，不一致就拒绝"，方向反了：
+  组分表的所有者是**流程图**，同一个单元接到哪股流股就用哪套组分；核对等于要求
+  每张流程图去迁就服务端启动时配的那套。实测立刻撞上——xRto 的组分库里根本没有
+  服务端配的 `C1`/`C2`。
+  现在 `setSlate` 经 `IXOptUnitExtension::SetComponents` 把组分表推给远端，远端
+  **整体重建**（`createModel` -> `setSlate` -> `validate` -> `generateEstimate`
+  -> `buildProblem`），端口映射、可固定变量、问题规模全部随之改变，消费端再重读
+  一遍。只在组分**确实变了**时才推：宿主在准备阶段会多次走到这里。
+  两个只有端到端才暴露的问题一并修了：
+  - 描述 JSON 里按组分写死的 `fixable_variables`（`in_fi_C1` 之类）在换组分后
+    必然失效。**推过组分表时**这些名字跳过而不报错——报错等于要求描述文件预知
+    将来用哪套组分，而那正是下推要解决的问题；没推过时仍然报错（那时描述是权威的）。
+  - **推失败要回滚**。`setComponents` 先 disconnect 再 connect，connect 失败时
+    原先是没人管的——对象停在"已断开"，模型没了，之后每个调用都失败，而真正的
+    原因早被冲掉。现在失败会恢复上一套组分并重连，报出的仍是推失败的原因。
+    `ARejectedPushLeavesThePreviousModelIntact` 钉住这条。
+  - 被拒时报错带上**推的是哪一套组分**：C ABI 的 `setSlate` 只返回 -1，模型说不出
+    是哪个组分不行，那是唯一还能给的线索。
+
+**验证**。`tests/test_xoptminlpco_unitports.cpp` 走真 IOR 绕一圈（不是注入引用，
+因为 `_narrow` 到 `IXOptUnitExtension` 只有在真引用上才考得到）。真实 Splitter
+端到端实测：1 进 2 出，进口 `T->in_T P->in_P fi_C1->in_fi_C1 fi_C2->in_fi_C2`，
+两个出口同款 `out1_*`/`out2_*`，4 个可固定变量带默认值，错的组分表被拒绝，
+问题经同一连接串仍是 `nv=12 nc=14`。
+
+**仍未做（PHASE 2）**。消费端实现 `ICapeThermoMaterialObject` 并自己跑一个 POA，
+往端口 `Connect` 一个 Material Object。那样组分表与端口变量枚举都回到标准接口，
+`XOPTCO_Ext.idl` 只剩可固定变量一项。代价是消费端 DLL 要变成一个 CORBA
+**服务端**（POA + ORB 线程），并拖进整个 Thermo 接口族。
+
+**连接目标怎么配（2026-09 改过一次）**。宿主只把 DLL 路径传给黑箱 DLL——
+`xOptModelBlackBox` 调 `createModel` 时 name 写死是 `"BlackBoxModel"`，`UnitModel.json`
+里其余字段一个都到不了消费端 DLL。所以优先级定为：
+
+1. `createModel` 的 name（自带 scheme 时）—— 最具体。**平台侧已转发**（2026-09）：
+   `xOpt::createModel` 在 `ModelType="BlackBox"` 分支把 `ProblemPath` 传给
+   `xOptModelBlackBox`，后者原样转成 `xOptModel_createModel` 的 name 形参
+   （空则沿用历史值 `"BlackBoxModel"`，既有模型不受影响）。于是配置终于能写进
+   `UnitModel.json`：`"ProblemPath": "corba:corbaname::host:port#xopt/unit"`。
+   该字段在这条分支上本来就空闲——BlackBox 不经 `createProblem`。
+   改动跨两个仓库：`cxxproj` 的 `include/xOptInc/xOptModelBlackBox.h`，
+   `cxxproj/libsrc/xOpt` 的 `src/Model/xOptModelBlackBox.cpp` 与 `src/xOpt.cpp`
+2. **DLL 同目录的 `<DLL 基名>.target`** —— 每个部署目录一份，跟着部署走
+3. 环境变量 `XRTO_CAPEOPEN_TARGET` —— 全局默认 / 调试覆盖
+4. 都没有 -> **失败**
+
+第 4 条原先是"回退 `mock:default`"，害人：用户在 xRto 里放一个远端模型、**根本没起
+服务端**，求解照样成功——解的却是内置的二变量 mock。连不上是能查的，解错了不是。
+已改为失败并打出该建哪个文件，回归测试
+`CapeOpenModelTest.UnconfiguredTargetFails_RatherThanSilentlyUsingTheMock` 钉住
+（已反向验证）。
+
+第 2 条排在环境变量**前面**是刻意的：环境变量是全局的，一旦设了会把所有单元一起
+盖掉，而两个单元连不同服务端时那就没法共存了。最具体的优先。
+
+**状态仍是 self-interop**。至今所有验证的两端都是从同一份重建 IDL 编出来的，
+证明的是重建自洽 + 说标准 GIOP，**不是**与官方 IDL 一致。别对第三方宣称合规。
 
 ## 附：N1 落地清单
 - `xOptMINLPco/XOptMINLPAdapter.{h,cpp}`：加载器 + adapter（实现 `ICapeMINLPModel`）。

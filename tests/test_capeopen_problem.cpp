@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "CapeBackendFactory.h"
@@ -177,6 +178,196 @@ TEST(CapeBackendFactoryTest, UnregisteredScheme_ReturnsNullNotThrow) {
 }
 
 }  // namespace
+
+// ===========================================================================
+//  刷新的提交/失效语义
+// ===========================================================================
+
+// 一个规模可变、且能在指定调用上注入故障的后端桩。
+//
+// 只实现 CapeMINLPProblemCore 在 initialize()/refresh() 里真正会用到的那些；
+// 其余按接口给出最小可用实现。
+class ResizableStub : public ICapeMINLPModel {
+  public:
+    int n_var = 3;
+    int n_con = 2;
+    std::string tag = "old";           // 变量名后缀，用来分辨新旧
+    bool fail_variable_names = false;  // 故障注入点
+
+    int connect() override { return 0; }
+    void disconnect() override {}
+    int getSize(CapeMINLPSize& out) override {
+        out = CapeMINLPSize{};
+        out.num_variables = n_var;
+        out.num_constraints = n_con;
+        return 0;
+    }
+    int getStructure(const std::string&, std::vector<int>& r, std::vector<int>& c,
+                     std::vector<int>& o) override {
+        r.clear();
+        c.clear();
+        o.clear();
+        return 0;
+    }
+    int getVariableNames(const std::vector<int>& vids,
+                         std::vector<std::string>& out) override {
+        if (fail_variable_names) return -1;  // 相当于一次 COMM_FAILURE
+        out.clear();
+        for (size_t i = 0; i < vids.size(); ++i) out.push_back(tag + "_x" + std::to_string(i));
+        return 0;
+    }
+    int getVariableBounds(const std::vector<int>& vids, std::vector<double>& lo,
+                          std::vector<double>& hi) override {
+        lo.assign(vids.size(), 0.0);
+        hi.assign(vids.size(), 1.0);
+        return 0;
+    }
+    int getVariableValues(const std::vector<int>& vids, std::vector<double>& v) override {
+        v.assign(vids.size(), 0.0);
+        return 0;
+    }
+    int setVariableValues(const std::vector<int>&, const std::vector<double>&) override {
+        return 0;
+    }
+    int getConstraintNames(const std::vector<int>& cids,
+                           std::vector<std::string>& out) override {
+        out.clear();
+        for (size_t i = 0; i < cids.size(); ++i) out.push_back(tag + "_c" + std::to_string(i));
+        return 0;
+    }
+    int getConstraintBounds(const std::vector<int>& cids, std::vector<double>& lo,
+                            std::vector<double>& hi) override {
+        lo.assign(cids.size(), 0.0);
+        hi.assign(cids.size(), 0.0);
+        return 0;
+    }
+    int getNonlinearConstraintValues(const std::vector<int>& cids,
+                                     std::vector<double>& v) override {
+        v.assign(cids.size(), 0.0);
+        return 0;
+    }
+    int getConstraintDerivativeValues(const std::string&, const std::vector<int>&,
+                                      std::vector<double>& v) override {
+        v.clear();
+        return 0;
+    }
+    int getObjectiveValue(double& v) override {
+        v = 0.0;
+        return 0;
+    }
+    int getObjectiveDerivativeValues(const std::string&, std::vector<double>& v) override {
+        v.clear();
+        return 0;
+    }
+    std::string lastError() const override { return "stub"; }
+};
+
+// 刷新在中途失败时，绝不能留下"规模是新的、名称还是旧的"这种混合缓存。
+//
+// 这是真实踩过的形状：readStructure 过去直接往成员上写——先 size_，再逐项
+// 覆盖。getVariableNames 半路失败的话，numVariables() 报新规模 4，而
+// var_names_ 还是旧的 3 项，getVariableNames(names, 4) 按新规模遍历旧数组，
+// 越界读。
+//
+// 现在的语义是提交/失效二选一：读全了才整体提交；没读全就一个字节都不改，
+// 并把对象标为 stale——缓存里那份是**旧问题**的结构，自洽但已经不是远端那个
+// 问题了，继续供出去等于安静地解错题。
+TEST(CapeOpenProblemRefreshTest, AFailedRefreshNeitherHalfUpdatesNorKeepsServing) {
+    auto owned = std::make_unique<ResizableStub>();
+    ResizableStub* stub = owned.get();
+    CapeMINLPProblemCore core(std::move(owned));
+    ASSERT_EQ(core.initialize(), 0);
+    ASSERT_EQ(core.numVariables(), 3);
+
+    const char* names[8] = {nullptr};
+    ASSERT_EQ(core.getVariableNames(names, 3), 3);
+    EXPECT_STREQ(names[0], "old_x0");
+
+    // 远端换了一套：规模变大、名字换新，但取名字这一步失败
+    stub->n_var = 4;
+    stub->tag = "new";
+    stub->fail_variable_names = true;
+
+    EXPECT_LT(core.refresh(), 0);
+    EXPECT_TRUE(core.isStale());
+
+    // 关键断言：不能报着新规模去索引旧数组。
+    // 现在的行为是整体拒绝服务——比返回一个"4 个变量但只有 3 个名字"安全得多。
+    EXPECT_LT(core.numVariables(), 0) << "陈旧的缓存不该继续对外服务";
+    EXPECT_LT(core.numConstraints(), 0);
+    EXPECT_LT(core.getVariableNames(names, 4), 0)
+        << "按新规模读旧名称数组就是越界，必须直接失败";
+
+    // 故障消失后重试：必须能完整恢复，且拿到的是**新**的那套
+    stub->fail_variable_names = false;
+    ASSERT_EQ(core.refresh(), 0);
+    EXPECT_FALSE(core.isStale());
+    EXPECT_EQ(core.numVariables(), 4);
+    ASSERT_EQ(core.getVariableNames(names, 4), 4);
+    EXPECT_STREQ(names[0], "new_x0");
+    EXPECT_STREQ(names[3], "new_x3");
+}
+
+// 后端只答了一部分（名称数组比规模短）同样要在提交前挡住，而不是等到访问器
+// 越界时才崩。桩这里通过"规模说 4、名称给 3"来制造。
+TEST(CapeOpenProblemRefreshTest, ARefreshWithShortArraysIsRejectedBeforeCommit) {
+    auto owned = std::make_unique<ResizableStub>();
+    ResizableStub* stub = owned.get();
+    CapeMINLPProblemCore core(std::move(owned));
+    ASSERT_EQ(core.initialize(), 0);
+
+    class ShortNames : public ResizableStub {
+      public:
+        int getVariableNames(const std::vector<int>&, std::vector<std::string>& out) override {
+            out.assign(2, "short");  // 比 num_variables 短
+            return 0;
+        }
+    };
+    (void)stub;
+
+    auto owned2 = std::make_unique<ShortNames>();
+    owned2->n_var = 4;
+    CapeMINLPProblemCore core2(std::move(owned2));
+    EXPECT_LT(core2.initialize(), 0) << "长度对不上必须在提交前被挡住";
+}
+
+// 外部可以把问题对象标记为失效，且这个标记必须真的挡住读取。
+//
+// 用在"远端可能已经被改掉，但我们还没能重新读回来"的时刻：CapeUnitCorba 的
+// setComponents 是"远端 SetComponents 成功 -> 回读拓扑"两步，第二步抛
+// COMM_FAILURE 时远端**已经是新问题**了，而调用方连 refresh 都没走到。这时
+// 缓存里那份是不是最新的无从判断，只能按失效处理 —— 否则故障消失后拿同一份
+// slate 重试，会因为"组分没变"直接返回成功，把旧结构一路带进求解器。
+//
+// 完整的那条路径（真实 CORBA + 在 GetComponents 上注入一次可解除的故障）本
+// 套件测不了：capeopen_core 编译 xOptModelCapeOpen.cpp 时不带
+// CAPEOPEN_WITH_CORBA，那段上下文逻辑根本没进这个二进制。这里钉住的是它依赖
+// 的那个原语。
+TEST(CapeOpenProblemRefreshTest, MarkStaleBlocksReadsUntilARefreshSucceeds) {
+    auto owned = std::make_unique<ResizableStub>();
+    ResizableStub* stub = owned.get();
+    CapeMINLPProblemCore core(std::move(owned));
+    ASSERT_EQ(core.initialize(), 0);
+    ASSERT_EQ(core.numVariables(), 3);
+    EXPECT_FALSE(core.isStale());
+
+    // 远端换了一套，但我们是从别的途径知道的（拓扑回读失败），没能刷新
+    stub->n_var = 4;
+    stub->tag = "new";
+    core.markStale();
+
+    EXPECT_TRUE(core.isStale());
+    EXPECT_LT(core.numVariables(), 0) << "标记失效后不能继续按旧结构服务";
+    const char* names[8] = {nullptr};
+    EXPECT_LT(core.getVariableNames(names, 3), 0);
+
+    // 恢复只能靠一次成功的刷新，而且拿到的必须是新的那套
+    ASSERT_EQ(core.refresh(), 0);
+    EXPECT_FALSE(core.isStale());
+    EXPECT_EQ(core.numVariables(), 4);
+    ASSERT_EQ(core.getVariableNames(names, 4), 4);
+    EXPECT_STREQ(names[0], "new_x0");
+}
 
 #ifndef USE_GTEST_MAIN
 int main(int argc, char** argv) {

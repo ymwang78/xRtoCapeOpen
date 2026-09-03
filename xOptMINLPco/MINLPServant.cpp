@@ -104,12 +104,21 @@ MINLPServant::MINLPServant(ICapeMINLPModel* model) : model_(model) {}
 
 MINLPServant::MINLPServant() {
     const char* dll = std::getenv("XRTO_XOPT_PROBLEM_DLL");
-    if (dll == nullptr || dll[0] == '\0') return;
-    owned_ = std::make_unique<XOptMINLPAdapter>(std::string(dll));
-    if (owned_->connect() < 0) {
-        owned_.reset();
+    if (dll == nullptr || dll[0] == '\0') {
+        init_error_ = "XRTO_XOPT_PROBLEM_DLL not set";
         return;
     }
+    // 描述 JSON（C-ABI 模型的初始化序列要用）；不给就让 adapter 在 DLL 同目录
+    // 自动发现唯一的 *_Model.json。
+    const char* desc = std::getenv("XRTO_XOPT_MODEL_DESC");
+    auto adapter = std::make_unique<XOptMINLPAdapter>(
+        std::string(dll), desc != nullptr ? std::string(desc) : std::string());
+    if (adapter->connect() < 0) {
+        init_error_ = adapter->lastError();
+        return;
+    }
+    owned_adapter_ = adapter.get();
+    owned_ = std::move(adapter);
     model_ = owned_.get();
 }
 
