@@ -44,9 +44,21 @@ class PauseMockSolver : public xOptSolver {
         for (int i = 0; i < n; ++i) r[i] = 0;
         return 0;
     }
-    int getIntOptions(const char*[], int[], int&) const override { return -1; }
-    int setIntOptions(boolean r[], const char*[], const int[], int n) override {
-        for (int i = 0; i < n; ++i) r[i] = 0;
+    // 唯一的整数选项 fail_x：置 1 之后 X() 一律答 -1——模拟"求解器说成功、
+    // 却交不出解向量"的后端，钉住服务端与桥接层都不能把它当成功。
+    int getIntOptions(const char* names[], int values[], int& n) const override {
+        for (int i = 0; i < n; ++i) {
+            if (std::string(names[i] != nullptr ? names[i] : "") != "fail_x") return -1;
+            values[i] = fail_x_ ? 1 : 0;
+        }
+        return 0;
+    }
+    int setIntOptions(boolean r[], const char* names[], const int values[], int n) override {
+        for (int i = 0; i < n; ++i) {
+            const bool known = std::string(names[i] != nullptr ? names[i] : "") == "fail_x";
+            if (known) fail_x_ = (values[i] != 0);
+            r[i] = known ? 1 : 0;
+        }
         return 0;
     }
     int getDoubleOptions(const char*[], double[], int&) const override { return -1; }
@@ -60,7 +72,7 @@ class PauseMockSolver : public xOptSolver {
     int continueSolve() override { return moveTo(2.0, RESULT_OPTIMAL); }
 
     int X(double* x, int x_size) const override {
-        if (x_.empty() || x_size < static_cast<int>(x_.size())) return -1;
+        if (fail_x_ || x_.empty() || x_size < static_cast<int>(x_.size())) return -1;
         for (size_t i = 0; i < x_.size(); ++i) x[i] = x_[i];
         return static_cast<int>(x_.size());
     }
@@ -95,6 +107,7 @@ class PauseMockSolver : public xOptSolver {
     xOptProblem* problem_;
     std::string name_;
     xOptLogFunc log_;
+    bool fail_x_ = false;
     std::vector<double> x_;
     std::vector<double> f_;
 };

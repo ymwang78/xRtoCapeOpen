@@ -265,6 +265,56 @@ TEST(XOptMINLPcoSolverIpc, ContinueSolveRefreshesTheBridgeSolution) {
     destroy(solver);
 }
 
+// 求解器说成功、却交不出解向量（X() 答 -1）：服务端按 ECapeSolvingError 报，
+// 桥接层**不能**拿扩展里存的成功码加本地问题里的初值冒充"成功 + 解"。
+// 宿主必须看到 solve() < 0 且 X() < 0。
+TEST(XOptMINLPcoSolverIpc, SolverWithoutASolutionVector_IsReportedAsFailure) {
+    const std::string dir = exeDir();
+    const std::string server = dir + "\\xOptMINLPcoSolverServer.exe";
+    const std::string bridge = dir + "\\xRtoCapeOpenSolver.dll";
+    const std::string ior_file = dir + "\\xoptminlpco_solver_ipc_failx.ior";
+
+    ServerProcess server_proc(server, MOCK_XOPTSOLVER_DLL, ior_file);
+    ASSERT_TRUE(server_proc.started()) << "cannot start the server: " << server;
+    std::string err;
+    const std::string ior = server_proc.waitForIor(std::chrono::seconds(30), err);
+    ASSERT_FALSE(ior.empty()) << err;
+    _putenv_s("XRTO_CAPEOPEN_SOLVER_TARGET", ("corba:" + ior).c_str());
+
+    HMODULE lib = LoadLibraryA(bridge.c_str());
+    ASSERT_NE(lib, nullptr);
+    auto create = reinterpret_cast<CreateSolverFunc>(GetProcAddress(lib, "createSolver"));
+    auto destroy = reinterpret_cast<DestroySolverFunc>(GetProcAddress(lib, "destroySolver"));
+    ASSERT_NE(create, nullptr);
+    ASSERT_NE(destroy, nullptr);
+
+    MockXOptProblem mock;
+    xOptSolver* solver = create("FLOWSHEET", &mock, &hostLog);
+    ASSERT_NE(solver, nullptr);
+
+    xOptSolver::boolean accepted[1] = {0};
+    const char* name[1] = {"fail_x"};
+    const int one[1] = {1};
+    ASSERT_EQ(solver->setIntOptions(accepted, name, one, 1), 0);
+    ASSERT_EQ(accepted[0], 1);
+
+    EXPECT_LT(solver->solve(), 0) << "no authoritative solution must never read as success";
+    std::vector<double> x(2, 7.0);
+    EXPECT_LT(solver->X(x.data(), 2), 0) << "X() must not hand out the problem's stale values";
+    EXPECT_DOUBLE_EQ(x[0], 7.0);  // 缓冲没被碰
+    std::vector<double> f(2, 7.0);
+    EXPECT_LT(solver->F(f.data(), 2), 0);
+
+    // 同一个求解器把开关关掉之后又能正常给解：失败状态不粘连
+    const int zero[1] = {0};
+    ASSERT_EQ(solver->setIntOptions(accepted, name, zero, 1), 0);
+    EXPECT_EQ(solver->solve(), xOptSolver::RESULT_USER_PAUSE);
+    ASSERT_EQ(solver->X(x.data(), 2), 2);
+    EXPECT_DOUBLE_EQ(x[0], 1.0);
+
+    destroy(solver);
+}
+
 // 没配连接目标时 createSolver 必须失败，并且是在 createSolver 就失败。
 // 静默连上一个默认值（或返回一个不能用的求解器）会让 xRto 在 solve 时才炸，
 // 而且炸得不知所云。

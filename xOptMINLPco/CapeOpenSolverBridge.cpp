@@ -439,16 +439,21 @@ class CapeOpenRemoteSolver : public xOptSolver {
         x_.clear();
         f_.clear();
         result_ = RESULT_UNKNOWN;
+        bool remote_ok = false;
         try {
             // 阻塞在这里期间，远端对本进程 ICapeMINLP 的每一次回调都在本线程上派发。
             system_->Solve();
+            remote_ok = true;
             result_ = CORBA::is_nil(ext_.in()) ? RESULT_OPTIMAL : ext_->GetSolveResult();
         } catch (const ce::ECapeSolvingError& e) {
-            // 求解器跑完了但说不行：原码在扩展里。
+            // 远端按失败报。两种情况：求解器自己给了负码（原码在扩展里）；或者
+            // 求解器说成功、但服务端拿不到 X / 写不回解——那时扩展里存的是求解器的
+            // 成功码，**不能**照搬，否则宿主看到的是"成功 + 一个不是解的向量"。
             result_ = RESULT_UNKNOWN;
             if (!CORBA::is_nil(ext_.in())) {
                 try {
-                    result_ = ext_->GetSolveResult();
+                    const int code = ext_->GetSolveResult();
+                    if (code < 0) result_ = code;
                 } catch (const CORBA::Exception&) {
                 }
             }
@@ -459,7 +464,8 @@ class CapeOpenRemoteSolver : public xOptSolver {
             result_ = RESULT_NUMERICAL_ISSUES;
             return result_;
         }
-        fetchSolution();
+        fetchSolution(remote_ok);
+        result_ = requireSolution(result_);
         log(ZLOG_INFOR, "[%s] remote solve finished: result=%d, objective=%.6e", name_.c_str(),
             result_, f_.empty() ? 0.0 : f_[0]);
         return result_;
@@ -486,9 +492,11 @@ class CapeOpenRemoteSolver : public xOptSolver {
                 result_ = rc;
                 x_.clear();
                 f_.clear();
-                fetchSolution();
+                fetchSolution(/*remote_ok*/ true);
+                result_ = requireSolution(result_);
                 log(ZLOG_INFOR, "[%s] remote continue finished: result=%d, objective=%.6e",
                     name_.c_str(), result_, f_.empty() ? 0.0 : f_[0]);
+                return result_;
             }
             return rc;
         } catch (const CORBA::Exception& e) {
@@ -554,15 +562,23 @@ class CapeOpenRemoteSolver : public xOptSolver {
         }
     }
 
-    // 解：优先问扩展（那是求解器自己报的 X/F）；没有扩展就退回问题——远端
-    // Solve 之后会经 SetMINLPVariableValues 把解写回本地问题，F 在本地重算。
-    void fetchSolution() {
+    // 解：有扩展就问扩展（那是求解器自己报的 X/F），扩展说拿不到就是拿不到——
+    // 不退回本地问题里的变量值，那只是初值或最后一次试探点，冒充成解比没有解
+    // 危险得多。没有扩展的标准系统才退回问题：远端 Solve 正常返回意味着它已经
+    // 经 SetMINLPVariableValues 把解写回本地问题（那是标准的取解路径），F 在
+    // 本地重算；Solve 抛过异常则同样不退回。
+    void fetchSolution(bool remote_ok) {
         const int n = problem_->numVariables();
         const int m = problem_->numConstraints();
         if (!CORBA::is_nil(ext_.in())) {
             try {
                 ct::CapeArrayDouble_var x = ext_->GetX();
                 cape_corba::fromDoubleSeq(x.in(), x_);
+                if (static_cast<int>(x_.size()) != n) {
+                    log(ZLOG_WARNI, "[%s] GetX returned %d values for %d variables; discarded",
+                        name_.c_str(), static_cast<int>(x_.size()), n);
+                    x_.clear();
+                }
             } catch (const CORBA::Exception& e) {
                 log(ZLOG_WARNI, "[%s] GetX: %s", name_.c_str(), describe(e).c_str());
             }
@@ -572,8 +588,9 @@ class CapeOpenRemoteSolver : public xOptSolver {
             } catch (const CORBA::Exception& e) {
                 log(ZLOG_WARNI, "[%s] GetF: %s", name_.c_str(), describe(e).c_str());
             }
+            return;
         }
-        if (x_.empty() && adapter_ && n > 0) {
+        if (remote_ok && adapter_ && n > 0) {
             adapter_->getVariableValues({}, x_);  // 远端最后一次 SetMINLPVariableValues 的值
         }
         if (f_.empty() && n > 0 && m >= 0 && !x_.empty()) {
@@ -590,6 +607,21 @@ class CapeOpenRemoteSolver : public xOptSolver {
                     name_.c_str());
             }
         }
+    }
+
+    // 没有权威的解向量就不能算成功：宿主拿到 >= 0 之后会去读 X()，而 X() 答 -1
+    // 时它多半不检查。负码原样保留（那已经是失败）。
+    int requireSolution(int code) {
+        if (!x_.empty()) return code;
+        f_.clear();  // 没有 X 的 F 不是解的一部分，一起作废
+        if (code >= 0) {
+            log(ZLOG_WARNI,
+                "[%s] the remote system reported %d but no solution vector is available; "
+                "reporting failure",
+                name_.c_str(), code);
+            return RESULT_UNKNOWN;
+        }
+        return code;
     }
 
     static int copyOut(const std::vector<double>& src, double* dst, int dst_size) {
