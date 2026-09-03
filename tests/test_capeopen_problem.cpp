@@ -331,6 +331,44 @@ TEST(CapeOpenProblemRefreshTest, ARefreshWithShortArraysIsRejectedBeforeCommit) 
     EXPECT_LT(core2.initialize(), 0) << "长度对不上必须在提交前被挡住";
 }
 
+// 外部可以把问题对象标记为失效，且这个标记必须真的挡住读取。
+//
+// 用在"远端可能已经被改掉，但我们还没能重新读回来"的时刻：CapeUnitCorba 的
+// setComponents 是"远端 SetComponents 成功 -> 回读拓扑"两步，第二步抛
+// COMM_FAILURE 时远端**已经是新问题**了，而调用方连 refresh 都没走到。这时
+// 缓存里那份是不是最新的无从判断，只能按失效处理 —— 否则故障消失后拿同一份
+// slate 重试，会因为"组分没变"直接返回成功，把旧结构一路带进求解器。
+//
+// 完整的那条路径（真实 CORBA + 在 GetComponents 上注入一次可解除的故障）本
+// 套件测不了：capeopen_core 编译 xOptModelCapeOpen.cpp 时不带
+// CAPEOPEN_WITH_CORBA，那段上下文逻辑根本没进这个二进制。这里钉住的是它依赖
+// 的那个原语。
+TEST(CapeOpenProblemRefreshTest, MarkStaleBlocksReadsUntilARefreshSucceeds) {
+    auto owned = std::make_unique<ResizableStub>();
+    ResizableStub* stub = owned.get();
+    CapeMINLPProblemCore core(std::move(owned));
+    ASSERT_EQ(core.initialize(), 0);
+    ASSERT_EQ(core.numVariables(), 3);
+    EXPECT_FALSE(core.isStale());
+
+    // 远端换了一套，但我们是从别的途径知道的（拓扑回读失败），没能刷新
+    stub->n_var = 4;
+    stub->tag = "new";
+    core.markStale();
+
+    EXPECT_TRUE(core.isStale());
+    EXPECT_LT(core.numVariables(), 0) << "标记失效后不能继续按旧结构服务";
+    const char* names[8] = {nullptr};
+    EXPECT_LT(core.getVariableNames(names, 3), 0);
+
+    // 恢复只能靠一次成功的刷新，而且拿到的必须是新的那套
+    ASSERT_EQ(core.refresh(), 0);
+    EXPECT_FALSE(core.isStale());
+    EXPECT_EQ(core.numVariables(), 4);
+    ASSERT_EQ(core.getVariableNames(names, 4), 4);
+    EXPECT_STREQ(names[0], "new_x0");
+}
+
 #ifndef USE_GTEST_MAIN
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

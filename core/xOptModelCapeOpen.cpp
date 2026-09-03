@@ -115,6 +115,15 @@ struct CapeOpenModelContext {
     // 远端把问题整个重建，而这个对象里缓存着重建前的规模与结构。
     // 双向注销：core 析构时把这里置空，本上下文析构时解除 core 的登记。
     CapeMINLPProblemCore* live_problem = nullptr;
+    // 已经发起过"可能改变远端"的调用，但还没有成功刷新过已交付的问题对象。
+    //
+    // 为什么不能只靠 live_problem->isStale()：远端 SetComponents 成功之后，
+    // 紧接着的拓扑回读才抛 COMM_FAILURE —— 那时远端**已经换成新问题**了，而
+    // 我们连 refresh 都还没走到，问题对象自然也没被标成 stale。故障消失后拿
+    // 同一份 slate 重试，ensureTopology 读到的已经是新组分，于是
+    // "wanted == components" 提前返回 0，旧结构就这么留下了。
+    // 所以脏标记必须在**发起调用之前**记，而不是等刷新失败才记。
+    bool problem_refresh_pending = false;
 #ifdef CAPEOPEN_WITH_CORBA
     bool topology_read = false;
     CapeUnitCorba topology;
@@ -166,15 +175,36 @@ void onTopologyRefreshFailed(CapeOpenModelContext* ctx, const char* what) {
 //
 // 刷新失败时 core 会把自己标成 stale 并让所有读取返回 -1（缓存里那份是旧问题
 // 的结构，供出去等于安静地解错题）。这笔欠账由 t_setSlate 的重试路径补上。
+// 发起"可能改变远端"的调用之前先记账：从这一刻起，已交付的问题对象缓存的
+// 结构就不再可信，直到有一次刷新成功。调用**成功还是失败都一样**——失败时
+// 我们并不知道远端到底改没改（SetComponents 可能已经生效，失败的是之后的
+// 回读），按"已改"处理是唯一安全的假设。
+void markProblemDirty(CapeOpenModelContext* ctx) {
+    ctx->problem_refresh_pending = true;
+    if (ctx->live_problem != nullptr) ctx->live_problem->markStale();
+}
+
+// 这个模型是否还欠着一次问题结构刷新。
+bool problemNeedsRefresh(const CapeOpenModelContext* ctx) {
+    if (ctx->problem_refresh_pending) return true;
+    return ctx->live_problem != nullptr && ctx->live_problem->isStale();
+}
+
 int refreshLiveProblem(CapeOpenModelContext* ctx, const char* what) {
-    if (ctx->live_problem == nullptr) return 0;
+    if (ctx->live_problem == nullptr) {
+        // 还没交付过问题对象：将来 buildProblem 会照当时的远端状态重新读，
+        // 没有欠账可言。
+        ctx->problem_refresh_pending = false;
+        return 0;
+    }
     if (ctx->live_problem->refresh() < 0) {
         std::fprintf(stderr,
                      "xRtoCapeOpen: %s: refreshing the delivered problem failed; it is now "
                      "marked stale and will refuse to serve until a later refresh succeeds\n",
                      what);
-        return -1;
+        return -1;  // 欠账留着，等下一次重试补
     }
+    ctx->problem_refresh_pending = false;
     return 0;
 }
 
@@ -348,6 +378,8 @@ int t_buildProblem(xOptModelHandle h, xOptProblemT* problem) {
         // 但本上下文要留一个非拥有指针：generateEstimate 会重建远端问题，
         // 那之后这个对象的缓存必须跟着刷新。
         if (ctx->live_problem != nullptr) ctx->live_problem->setLiveSlot(nullptr);
+        // 这个 core 刚照当时的远端状态读完，欠账到此为止。
+        ctx->problem_refresh_pending = false;
         ctx->live_problem = core;
         core->setLiveSlot(&ctx->live_problem);
         core->fillVtable(problem);
@@ -540,12 +572,14 @@ int t_setSlate(xOptModelHandle h, int slate_index, const xOptSlate* slate) {
         // 已交付的问题对象还停在 stale。这里不补的话，同一份 slate 重试永远
         // 走不到下面的重建分支，那个问题对象就再也回不来了——故障恢复之后
         // 一切看着正常，唯独结构还是旧的。
-        if (ctx->live_problem != nullptr && ctx->live_problem->isStale()) {
+        if (problemNeedsRefresh(ctx)) {
             return refreshLiveProblem(ctx, "setSlate(retry after a failed refresh)");
         }
         return 0;
     }
 
+    // 下面这一步可能改变远端，先记账再发起。
+    markProblemDirty(ctx);
     if (ctx->topology.setComponents(wanted) < 0) {
         // setComponents 内部以 read() 收尾，失败可能停在"已 clear、未填回"的
         // 中间态，所以善后必须在返回**之前**做。
@@ -593,6 +627,9 @@ int t_generateEstimate(xOptModelHandle h, double initx[], int& size,
     // 固定哪些是**流程图**说了算，不是服务端那份描述文件——进料由上游流股决定
     // 时一个都不该固定，而描述文件里通常把它们全列着。空表也照推。
     std::vector<double> x0;
+    // 同 setSlate：这一步会让服务端重建问题，先记账再发起。远端改没改在失败
+    // 时是判断不了的，按"已改"处理。
+    markProblemDirty(ctx);
     if (ctx->topology.generateEstimate(names, values, x0) < 0) {
         onTopologyRefreshFailed(ctx, "generateEstimate");
         return -1;
