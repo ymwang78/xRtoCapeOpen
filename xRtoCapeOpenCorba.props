@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xRtoCapeOpenCorba.props
+  ===================================================================
+  CORBA/TAO 通路三个手写工程的公共属性表（与 CMake 的 WITH_*_CORBA 分支等价）：
+    core\xRtoCapeOpen.vcxproj                -> xRtoCapeOpen.dll       (消费端模型 DLL)
+    xOptMINLPco\xRtoCapeOpenSolver.vcxproj   -> xRtoCapeOpenSolver.dll (求解器桥接 DLL)
+    xOptMINLPco\xOptMINLPcoSolverServer.vcxproj -> xOptMINLPcoSolverServer.exe (求解器服务端)
+
+  这里集中：TAO 三元组路径、tao_idl 桩代码生成、以及三个工程都要重编的
+  capeopen_core + COM/CORBA 后端 + IDL 桩源码。CMake 靠静态库共享，这里沿用
+  既有手写 vcxproj（xOptMINLPco.vcxproj）的做法——直接把源码编进各自工程，
+  不再造中间静态库。
+
+  TAO 三元组（vcpkg ace[tao]，x64-windows-static-md）默认路径见下，命令行可覆盖：
+    msbuild ... /p:TaoTripletDir=E:\path\to\vcpkg\installed\x64-windows-static-md
+  改 IDL(.idl) 或换 TAO 后，删掉 $(IntDir)idlgen 让 tao_idl 重新生成。
+-->
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <!-- 本 props 就在仓库切片根 (…\libsrc\xRtoCapeOpen\)，据此锚定所有相对路径 -->
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+    <!-- 仓库根 include（<xOpt/xOptProblem.h> 等 C 头）：…\cxxproj\include -->
+    <XoptIncludeDir>$(RepoRoot)..\..\include</XoptIncludeDir>
+
+    <!-- vcpkg 安装三元组目录（含 ACE/TAO 静态库与 tao_idl）。命令行 /p: 可覆盖 -->
+    <TaoTripletDir Condition="'$(TaoTripletDir)'==''">D:\Github\vcpkg\installed\x64-windows-static-md</TaoTripletDir>
+    <TaoIncludeDir>$(TaoTripletDir)\include</TaoIncludeDir>
+    <TaoIdlExe>$(TaoTripletDir)\tools\ace\tao_idl.exe</TaoIdlExe>
+
+    <!-- tao_idl 桩代码输出：逐工程逐配置放进各自 IntDir，互不污染 -->
+    <IdlOutDir>$(IntDir)idlgen</IdlOutDir>
+    <IdlGenDir>$(IdlOutDir)\</IdlGenDir>
+  </PropertyGroup>
+
+  <!-- 静态 ACE/TAO 的 lib 目录逐配置分开（debug 版库名带尾缀 d） -->
+  <PropertyGroup Condition="'$(Configuration)'=='Debug'">
+    <TaoLibDir>$(TaoTripletDir)\debug\lib</TaoLibDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)'!='Debug'">
+    <TaoLibDir>$(TaoTripletDir)\lib</TaoLibDir>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- TAO 生成的桩（CAPEOPEN100_UnitS.cpp 等）段数超 65535，必须 /bigobj -->
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+      <!-- TAO 头不吃 /permissive-，保持 MSVC 默认宽松模式（与 CMake 一致） -->
+      <ConformanceMode>false</ConformanceMode>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <!-- static-md 三元组 = 动态 CRT + 静态 ACE/TAO；ACE/TAO_AS_STATIC_LIBS 必给 -->
+      <PreprocessorDefinitions>WIN32;_WINDOWS;ACE_AS_STATIC_LIBS=1;TAO_AS_STATIC_LIBS=1;CAPEOPEN_WITH_COM;CAPEOPEN_WITH_CORBA;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(RepoRoot)core;$(RepoRoot)core\backend\com;$(RepoRoot)core\backend\corba;$(XoptIncludeDir);$(IdlGenDir);$(TaoIncludeDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(TaoLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- ACE/TAO 静态库：release 无尾缀，debug 带 d（与 vcpkg lib 目录一致） -->
+  <ItemDefinitionGroup Condition="'$(Configuration)'!='Debug'">
+    <Link>
+      <AdditionalDependencies>TAO_CosNamings.lib;TAO_PortableServers.lib;TAO_AnyTypeCodes.lib;TAOs.lib;ACEs.lib;ws2_32.lib;mswsock.lib;advapi32.lib;user32.lib;iphlpapi.lib;ole32.lib;oleaut32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
+    <Link>
+      <AdditionalDependencies>TAO_CosNamingsd.lib;TAO_PortableServersd.lib;TAO_AnyTypeCodesd.lib;TAOsd.lib;ACEsd.lib;ws2_32.lib;mswsock.lib;advapi32.lib;user32.lib;iphlpapi.lib;ole32.lib;oleaut32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <!-- ============ tao_idl：从 .idl 生成 C/S 桩（编译前） ============
+       与 core/CMakeLists.txt 的三条 add_custom_command 一字对应：
+         Minlp  只需 -I <TAO include>
+         Unit / Ext  另加 -I <仓库切片根>（它们 #include 上一份复用 Common::*）
+       -Yp,cl.exe 指定预处理器；VS/vcvars 构建时 cl 在 PATH 上。
+       Inputs/Outputs 提供增量：桩比 .idl 新则跳过。 -->
+  <Target Name="GenerateCapeOpenIdlStubs"
+          BeforeTargets="ClCompile"
+          Inputs="$(RepoRoot)CAPEOPEN100_Minlp.idl;$(RepoRoot)CAPEOPEN100_Unit.idl;$(RepoRoot)XOPTCO_Ext.idl"
+          Outputs="$(IdlGenDir)CAPEOPEN100_MinlpC.cpp;$(IdlGenDir)CAPEOPEN100_UnitC.cpp;$(IdlGenDir)XOPTCO_ExtC.cpp">
+    <MakeDir Directories="$(IdlOutDir)" />
+    <Message Importance="high" Text="tao_idl: generating CAPE-OPEN CORBA stubs into $(IdlOutDir)" />
+    <Exec Command="&quot;$(TaoIdlExe)&quot; -Yp,cl.exe -I &quot;$(TaoIncludeDir)&quot; -o &quot;$(IdlOutDir)&quot; &quot;$(RepoRoot)CAPEOPEN100_Minlp.idl&quot;" />
+    <Exec Command="&quot;$(TaoIdlExe)&quot; -Yp,cl.exe -I &quot;$(TaoIncludeDir)&quot; -I &quot;$(RepoRoot.TrimEnd('\'))&quot; -o &quot;$(IdlOutDir)&quot; &quot;$(RepoRoot)CAPEOPEN100_Unit.idl&quot;" />
+    <Exec Command="&quot;$(TaoIdlExe)&quot; -Yp,cl.exe -I &quot;$(TaoIncludeDir)&quot; -I &quot;$(RepoRoot.TrimEnd('\'))&quot; -o &quot;$(IdlOutDir)&quot; &quot;$(RepoRoot)XOPTCO_Ext.idl&quot;" />
+  </Target>
+
+  <!-- ============ 三个工程都要的公共源（IDL 桩 + core + COM/CORBA 后端） ============ -->
+  <ItemGroup>
+    <!-- tao_idl 生成的桩（GenerateCapeOpenIdlStubs 在 ClCompile 前产出） -->
+    <ClCompile Include="$(IdlGenDir)CAPEOPEN100_MinlpC.cpp" />
+    <ClCompile Include="$(IdlGenDir)CAPEOPEN100_MinlpS.cpp" />
+    <ClCompile Include="$(IdlGenDir)CAPEOPEN100_UnitC.cpp" />
+    <ClCompile Include="$(IdlGenDir)CAPEOPEN100_UnitS.cpp" />
+    <ClCompile Include="$(IdlGenDir)XOPTCO_ExtC.cpp" />
+    <ClCompile Include="$(IdlGenDir)XOPTCO_ExtS.cpp" />
+
+    <!-- 后端无关核心（含 DLL 的 C 入口 xOptModel_createModel） -->
+    <ClCompile Include="$(RepoRoot)core\CapeMINLPModelMock.cpp" />
+    <ClCompile Include="$(RepoRoot)core\CapeMINLPProblemCore.cpp" />
+    <ClCompile Include="$(RepoRoot)core\CapeBackendFactory.cpp" />
+    <ClCompile Include="$(RepoRoot)core\xOptModelCapeOpen.cpp" />
+
+    <!-- COM 后端（CAPEOPEN_WITH_COM；CapeBackendFactory 里按 "com:" 目标选它） -->
+    <ClCompile Include="$(RepoRoot)core\backend\com\CapeVariantMarshal.cpp" />
+    <ClCompile Include="$(RepoRoot)core\backend\com\CapeMINLPModelCom.cpp" />
+    <ClCompile Include="$(RepoRoot)core\backend\com\CapeRegisterComBackend.cpp" />
+
+    <!-- CORBA 后端（CAPEOPEN_WITH_CORBA；"corba:" 目标走它） -->
+    <ClCompile Include="$(RepoRoot)core\backend\corba\CapeMINLPModelCorba.cpp" />
+    <ClCompile Include="$(RepoRoot)core\backend\corba\CapeRegisterCorbaBackend.cpp" />
+    <ClCompile Include="$(RepoRoot)core\backend\corba\CapeUnitCorba.cpp" />
+  </ItemGroup>
+</Project>

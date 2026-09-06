@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  xRtoCapeOpenProvider.props
+  ===================================================================
+  求解器通路“生产端”的公共源，供以下两个工程共用（与 CMake 的
+  xoptminlpco_corba 静态库等价）：
+    xOptMINLPco\xRtoCapeOpenSolver.vcxproj      -> xRtoCapeOpenSolver.dll
+    xOptMINLPco\xOptMINLPcoSolverServer.vcxproj -> xOptMINLPcoSolverServer.exe
+
+  消费端模型 DLL（core\xRtoCapeOpen.vcxproj）**不**用这些——它只连远端，不发布
+  servant，故这份 props 单独拆出，只被上面两个工程导入。
+  必须在 xRtoCapeOpenCorba.props 之后导入（依赖其 $(RepoRoot) 与 include 设置）。
+-->
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <!-- SolverServant.h / CorbaPublish.h / XOptMINLPAdapter.h 等都在 xOptMINLPco\ -->
+      <AdditionalIncludeDirectories>$(RepoRoot)xOptMINLPco;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <!-- provider 核心：C-ABI 黑箱 -> xOptProblem -> CAPE-OPEN -->
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\XOptMINLPAdapter.cpp" />
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\XOptModelDesc.cpp" />
+
+    <!-- CORBA servant + 远端问题包装 + 发布工具（IOR 落盘 / Naming / 停机） -->
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\MINLPServant.cpp" />
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\UnitServant.cpp" />
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\SolverServant.cpp" />
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\XOptProblemFromVtable.cpp" />
+    <ClCompile Include="$(RepoRoot)xOptMINLPco\CorbaPublish.cpp" />
+  </ItemGroup>
+</Project>
