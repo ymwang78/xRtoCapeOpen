@@ -746,6 +746,9 @@ CAPE-OPEN 的求解器侧是 `ICapeMINLPSolverManager::CreateMINLPSystem(theMINL
 - **连接目标**：`createSolver` 的 name 自带 scheme（xRto 传的是 "FLOWSHEET"，走不到）
   -> DLL 同目录 `xRtoCapeOpenSolver.target` -> 环境变量 `XRTO_CAPEOPEN_SOLVER_TARGET`
   -> 失败并打出该建哪个文件。与模型通路同一套道理与顺序。
+- **空 problem**：xRto 设置页读选项默认值时拿空 problem 调 `createSolver`（xOpt 对此
+  只打 DEBUG，其它求解器照常建实例）。桥接 DLL 离了问题连不上远端，在解析连接目标
+  之前就返回 nullptr，只打 DEBUG 不打 ERROR（xRto2 issue #194）。
 - 两个 server exe 共用的发布工具（IOR 原子落盘、Naming 绑定/解绑、停机信号）
   抽进 `CorbaPublish.{h,cpp}`——两者的发布语义必须一致，而一致最可靠的保证是
   同一份代码；`MINLPCorbaServer.cpp` 行为不变。

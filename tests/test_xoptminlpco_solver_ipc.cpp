@@ -51,6 +51,9 @@ std::string exeDir() {
     return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
 }
 
+// 宿主日志里出现过的最高级别；要断言"没报错"的用例先把它清回 ZLOG_TRACE。
+ZLOG_LEVEL g_max_host_log_level = ZLOG_TRACE;
+
 void hostLog(ZLOG_LEVEL level, const char* format, ...) {
     char buf[2048];
     va_list args;
@@ -58,6 +61,7 @@ void hostLog(ZLOG_LEVEL level, const char* format, ...) {
     std::vsnprintf(buf, sizeof(buf), format, args);
     va_end(args);
     std::printf("  [host log %d] %s\n", static_cast<int>(level), buf);
+    if (level > g_max_host_log_level) g_max_host_log_level = level;
 }
 
 // 起 server 进程、等它把 IOR 落盘、退出时收尸（与 test_xoptminlpco_corba_ipc 同款）。
@@ -329,6 +333,24 @@ TEST(XOptMINLPcoSolverIpc, NoTargetConfigured_CreateSolverFails) {
     // 构建目录里没有 xRtoCapeOpenSolver.target；若哪天有人放了一个，这条会失败，
     // 那也正是它该提醒的事。
     EXPECT_EQ(create("FLOWSHEET", &mock, &hostLog), nullptr);
+}
+
+// xRto 的设置页为了读选项默认值，拿**空** problem 调 createSolver（xOpt::createSolver
+// 对空 problem 只打 DEBUG，其它求解器 DLL 照常建出实例）。本求解器离了问题连不上远端，
+// 只能返回空；但这是宿主的正常查询，不许往宿主日志里打 WARN 及以上——否则用户每打开
+// 一次设置页，日志窗口就多一条 ERROR（xRto2 issue #194）。连接目标配好了也不能去连：
+// 这里配一个连不上的目标，空 problem 若没在最前面拦下，就会去连它并报错。
+TEST(XOptMINLPcoSolverIpc, NullProblem_CreateSolverDeclinesQuietly) {
+    const std::string bridge = exeDir() + "\\xRtoCapeOpenSolver.dll";
+    _putenv_s("XRTO_CAPEOPEN_SOLVER_TARGET", "corba:corbaloc:iiop:127.0.0.1:1/NoSuchSolver");
+    HMODULE lib = LoadLibraryA(bridge.c_str());
+    ASSERT_NE(lib, nullptr);
+    auto create = reinterpret_cast<CreateSolverFunc>(GetProcAddress(lib, "createSolver"));
+    ASSERT_NE(create, nullptr);
+    g_max_host_log_level = ZLOG_TRACE;
+    EXPECT_EQ(create("FLOWSHEET", nullptr, &hostLog), nullptr);
+    EXPECT_LT(g_max_host_log_level, ZLOG_WARNI);
+    _putenv_s("XRTO_CAPEOPEN_SOLVER_TARGET", "");
 }
 
 }  // namespace

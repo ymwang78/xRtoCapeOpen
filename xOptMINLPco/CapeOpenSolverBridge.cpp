@@ -717,7 +717,15 @@ extern "C" {
 __declspec(dllexport) xOptSolver* createSolver(const char* name, xOptProblem* problem,
                                                xOptLogFunc logFunc) {
     if (problem == nullptr) {
-        hostLog(logFunc, ZLOG_ERROR, "createSolver: problem is null");
+        // 空 problem 是宿主的正常查询，不是故障。xRto 的"设置 → 求解器参数 / 参数整定"页
+        // 为了读选项默认值，交的是一个还没 prepareRuntime 的空组合模型；xOpt::createSolver
+        // 自己对空 problem 也只打 DEBUG，其它求解器 DLL 照常建出实例。本求解器离了问题
+        // 连不上远端（CreateMINLPSystem 要回调读问题结构），只能不创建——但不能按 ERROR
+        // 报，否则用户每打开一次设置页，日志窗口就多一条红字（xRto2 issue #194）。
+        // 真求解时交的不会是空问题；万一是，宿主拿到 nullptr 自己会报"求解器不存在"。
+        hostLog(logFunc, ZLOG_DEBUG,
+                "createSolver: problem is null (the host is only querying options); "
+                "the CAPE-OPEN solver needs a problem to connect, so none is created");
         return nullptr;
     }
     std::string source;
