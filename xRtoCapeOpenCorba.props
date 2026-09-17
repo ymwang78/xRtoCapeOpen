@@ -12,8 +12,14 @@
   既有手写 vcxproj（xOptMINLPco.vcxproj）的做法——直接把源码编进各自工程，
   不再造中间静态库。
 
-  TAO 三元组（vcpkg ace[tao]，x64-windows-static-md）默认路径见下，命令行可覆盖：
-    msbuild ... /p:TaoTripletDir=E:\path\to\vcpkg\installed\x64-windows-static-md
+  TAO 三元组（vcpkg ace[tao]，x64-windows-static-md）不写死路径，按下列顺序取
+  第一个装了 tao_idl.exe 的 vcpkg：
+    1. 命令行 msbuild ... /p:TaoTripletDir=E:\path\to\vcpkg\installed\x64-windows-static-md
+    2. 环境变量 VCPKG_ROOT
+    3. $(VcpkgRoot)（`vcpkg integrate install` 的用户级集成）
+    4. 环境变量 VCPKG_INSTALLATION_ROOT（GitHub Actions 等 CI 镜像）
+  逐个检查存在性是因为 VS 开发者命令行会把 VCPKG_ROOT 指向 VS 自带的 vcpkg，
+  那份没有 installed\ 目录。都找不到时构建直接报错并给出提示。
   改 IDL(.idl) 或换 TAO 后，删掉 $(IntDir)idlgen 让 tao_idl 重新生成。
 -->
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
@@ -23,8 +29,15 @@
     <!-- 仓库根 include（<xOpt/xOptProblem.h> 等 C 头）：…\cxxproj\include -->
     <XoptIncludeDir>$(RepoRoot)..\..\include</XoptIncludeDir>
 
-    <!-- vcpkg 安装三元组目录（含 ACE/TAO 静态库与 tao_idl）。命令行 /p: 可覆盖 -->
-    <TaoTripletDir Condition="'$(TaoTripletDir)'==''">D:\Github\vcpkg\installed\x64-windows-static-md</TaoTripletDir>
+    <!-- vcpkg 安装三元组目录（含 ACE/TAO 静态库与 tao_idl）。查找顺序见文件头注释 -->
+    <TaoTriplet Condition="'$(TaoTriplet)'==''">x64-windows-static-md</TaoTriplet>
+    <!-- 候选目录先单独算好：Condition 里 Exists('…') 不能再嵌套带引号的属性函数 -->
+    <_TaoTripletFromVcpkgRootEnv Condition="'$(VCPKG_ROOT)'!=''">$([MSBuild]::EnsureTrailingSlash('$(VCPKG_ROOT)'))installed\$(TaoTriplet)</_TaoTripletFromVcpkgRootEnv>
+    <_TaoTripletFromVcpkgIntegration Condition="'$(VcpkgRoot)'!=''">$([MSBuild]::EnsureTrailingSlash('$(VcpkgRoot)'))installed\$(TaoTriplet)</_TaoTripletFromVcpkgIntegration>
+    <_TaoTripletFromCiVcpkg Condition="'$(VCPKG_INSTALLATION_ROOT)'!=''">$([MSBuild]::EnsureTrailingSlash('$(VCPKG_INSTALLATION_ROOT)'))installed\$(TaoTriplet)</_TaoTripletFromCiVcpkg>
+    <TaoTripletDir Condition="'$(TaoTripletDir)'=='' and '$(_TaoTripletFromVcpkgRootEnv)'!='' and Exists('$(_TaoTripletFromVcpkgRootEnv)\tools\ace\tao_idl.exe')">$(_TaoTripletFromVcpkgRootEnv)</TaoTripletDir>
+    <TaoTripletDir Condition="'$(TaoTripletDir)'=='' and '$(_TaoTripletFromVcpkgIntegration)'!='' and Exists('$(_TaoTripletFromVcpkgIntegration)\tools\ace\tao_idl.exe')">$(_TaoTripletFromVcpkgIntegration)</TaoTripletDir>
+    <TaoTripletDir Condition="'$(TaoTripletDir)'=='' and '$(_TaoTripletFromCiVcpkg)'!='' and Exists('$(_TaoTripletFromCiVcpkg)\tools\ace\tao_idl.exe')">$(_TaoTripletFromCiVcpkg)</TaoTripletDir>
     <TaoIncludeDir>$(TaoTripletDir)\include</TaoIncludeDir>
     <TaoIdlExe>$(TaoTripletDir)\tools\ace\tao_idl.exe</TaoIdlExe>
 
@@ -72,6 +85,15 @@
     </Link>
   </ItemDefinitionGroup>
 
+  <!-- TaoTripletDir 没解析到时尽早报错。不带 Inputs/Outputs，桩已是最新时也会检查，
+       避免只剩一堆找不到 TAO 头的编译错误 -->
+  <Target Name="ValidateTaoTripletDir">
+    <Error Condition="'$(TaoTripletDir)'==''"
+           Text="找不到装有 ace[tao] ($(TaoTriplet)) 的 vcpkg：请设置环境变量 VCPKG_ROOT、执行 vcpkg integrate install，或传 /p:TaoTripletDir=&lt;vcpkg&gt;\installed\$(TaoTriplet)" />
+    <Error Condition="'$(TaoTripletDir)'!='' and !Exists('$(TaoIdlExe)')"
+           Text="TaoTripletDir=$(TaoTripletDir) 下没有 tools\ace\tao_idl.exe，请确认已安装 vcpkg ace[tao]:$(TaoTriplet)" />
+  </Target>
+
   <!-- ============ tao_idl：从 .idl 生成 C/S 桩（编译前） ============
        与 core/CMakeLists.txt 的三条 add_custom_command 一字对应：
          Minlp  只需 -I <TAO include>
@@ -80,6 +102,7 @@
        Inputs/Outputs 提供增量：桩比 .idl 新则跳过。 -->
   <Target Name="GenerateCapeOpenIdlStubs"
           BeforeTargets="ClCompile"
+          DependsOnTargets="ValidateTaoTripletDir"
           Inputs="$(RepoRoot)CAPEOPEN100_Minlp.idl;$(RepoRoot)CAPEOPEN100_Unit.idl;$(RepoRoot)XOPTCO_Ext.idl"
           Outputs="$(IdlGenDir)CAPEOPEN100_MinlpC.cpp;$(IdlGenDir)CAPEOPEN100_UnitC.cpp;$(IdlGenDir)XOPTCO_ExtC.cpp">
     <MakeDir Directories="$(IdlOutDir)" />
